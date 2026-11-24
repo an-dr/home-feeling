@@ -27,7 +27,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::keys::{Hotkey, Key};
-use crate::protocol::{Capabilities, Id, Monitor, Overlay, Rect, Snapshot, WindowInfo};
+use crate::protocol::{Capabilities, Id, Monitor, Overlay, Point, Rect, Snapshot, WindowInfo};
 use crate::{Backend, RawEvent};
 
 /// Wakes the thread to read its command channel.
@@ -65,6 +65,8 @@ pub struct Windows {
     monitors: Vec<Monitor>,
     /// Windows moved on request, and when to report the frame they took.
     checks: Vec<(Id, std::time::Instant, Rect)>,
+    /// The window the user is dragging or resizing, if any.
+    dragging: Option<Id>,
 }
 
 /// How long a window gets to settle after a move before its frame is
@@ -98,6 +100,7 @@ impl Windows {
             focused: None,
             monitors: monitors(),
             checks: Vec::new(),
+            dragging: None,
         };
         for hwnd in top_level_windows() {
             if let Some(info) = describe(hwnd) {
@@ -148,6 +151,12 @@ impl Windows {
                     out.push(RawEvent::Focused(id));
                 }
             }
+            EVENT_SYSTEM_MOVESIZESTART => {
+                if self.known.contains_key(&id) {
+                    self.dragging = Some(id);
+                    out.push(RawEvent::DragStarted(id, cursor()));
+                }
+            }
             EVENT_OBJECT_LOCATIONCHANGE | EVENT_SYSTEM_MOVESIZEEND => {
                 if let Some(info) = self.known.get_mut(&id) {
                     let maximized = unsafe { IsZoomed(hwnd as HWND) } != 0;
@@ -166,7 +175,10 @@ impl Windows {
                         // The end of a drag or resize by the user, as opposed
                         // to a move this module or the app made.
                         if event == EVENT_SYSTEM_MOVESIZEEND {
-                            out.push(RawEvent::Dragged(id, rect));
+                            self.dragging = None;
+                            out.push(RawEvent::Dragged(id, rect, cursor()));
+                        } else if self.dragging == Some(id) {
+                            out.push(RawEvent::Dragging(id, rect, cursor()));
                         }
                     }
                 }
@@ -282,6 +294,16 @@ impl Backend for Windows {
         Ok(())
     }
 
+    fn minimize(&mut self, id: Id) -> Result<(), String> {
+        unsafe { ShowWindow(id as HWND, SW_SHOWMINNOACTIVE) };
+        Ok(())
+    }
+
+    fn restore(&mut self, id: Id) -> Result<(), String> {
+        unsafe { ShowWindow(id as HWND, SW_SHOWNOACTIVATE) };
+        Ok(())
+    }
+
     fn focus(&mut self, id: Id) -> Result<(), String> {
         let hwnd = id as HWND;
         unsafe {
@@ -319,6 +341,13 @@ impl Backend for Windows {
     fn clear_overlay(&mut self, key: u32) {
         self.command(Command::ClearOverlay(key));
     }
+}
+
+/// The cursor, in real pixels.
+fn cursor() -> Point {
+    let mut p = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut p) };
+    Point { x: p.x, y: p.y }
 }
 
 /// The visible frame, without invisible borders.

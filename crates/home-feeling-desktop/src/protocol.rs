@@ -6,13 +6,17 @@
 //! - `desktop/windows/moved` `{ "id", "rect" }`, after any change of position or size
 //! - `desktop/windows/settled` `{ "id", "rect", "requested" }`, the frame a window took
 //!   after a requested move, sent whether or not it changed
-//! - `desktop/windows/dragged` `{ "id", "rect" }`, when the user ends a drag or resize
+//! - `desktop/windows/drag-started` `{ "id", "cursor" }`, when the user starts a drag or resize
+//! - `desktop/windows/dragging` `{ "id", "rect", "cursor" }`, during it, at most once a frame
+//! - `desktop/windows/dragged` `{ "id", "rect", "cursor" }`, when the user ends it
 //! - `desktop/windows/maximized` `{ "id", "maximized" }`, on maximize and restore
 //! - `desktop/monitors/changed` `{ "monitors": [Monitor] }`
 //! - `desktop/hotkeys/pressed` `{ "owner", "id" }`
 //!
 //! It listens on:
-//! - `desktop/windows/move` `{ "id", "rect", "raise"? }`; `raise` also brings it to the front, `desktop/windows/focus` `{ "id" }`
+//! - `desktop/windows/move` `{ "id", "rect", "raise"? }`; `raise` also brings it to the front
+//! - `desktop/windows/minimize` `{ "id" }`, `desktop/windows/restore` `{ "id" }`, neither
+//!   taking focus, `desktop/windows/focus` `{ "id" }`
 //! - `desktop/hotkeys/register` `{ "id", "keys" }`, `desktop/hotkeys/unregister` `{ "id" }`
 //! - `desktop/overlay/set` `{ "id", "rect", "color", "width" }`, `desktop/overlay/clear` `{ "id" }`
 //!
@@ -29,6 +33,13 @@ pub struct Rect {
     pub y: i32,
     pub w: i32,
     pub h: i32,
+}
+
+/// A screen position in real pixels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
