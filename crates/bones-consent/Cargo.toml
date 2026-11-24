@@ -1,0 +1,15 @@
+[package]
+name = "bones-consent"
+version.workspace = true
+edition = "2021"
+license = "MIT"
+description = "Turns what a bones guest requests into the deny-list the user's answer allows"
+
+[dependencies]
+bones-messages = { path = "../../vendor/bones/crates/bones-messages" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
