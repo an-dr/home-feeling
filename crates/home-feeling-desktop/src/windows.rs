@@ -64,7 +64,7 @@ pub struct Windows {
     focused: Option<Id>,
     monitors: Vec<Monitor>,
     /// Windows moved on request, and when to report the frame they took.
-    checks: Vec<(Id, std::time::Instant)>,
+    checks: Vec<(Id, std::time::Instant, Rect)>,
 }
 
 /// How long a window gets to settle after a move before its frame is
@@ -214,18 +214,18 @@ impl Backend for Windows {
         // comes; report the frame anyway, so the requester learns the outcome.
         let now = std::time::Instant::now();
         let (due, waiting): (Vec<_>, Vec<_>) =
-            self.checks.drain(..).partition(|(_, at)| now >= *at);
+            self.checks.drain(..).partition(|(_, at, _)| now >= *at);
         self.checks = waiting;
-        for (id, _) in due {
+        for (id, _, requested) in due {
             if let (Some(info), Some(rect)) = (self.known.get_mut(&id), frame(id as HWND)) {
                 info.rect = rect;
-                out.push(RawEvent::Moved(id, rect));
+                out.push(RawEvent::Settled(id, rect, requested));
             }
         }
         out
     }
 
-    fn move_window(&mut self, id: Id, rect: Rect) -> Result<(), String> {
+    fn move_window(&mut self, id: Id, rect: Rect, raise: bool) -> Result<(), String> {
         let hwnd = id as HWND;
         unsafe {
             if IsWindow(hwnd) == 0 {
@@ -267,9 +267,18 @@ impl Backend for Windows {
                     "could not move window {id}; it may run as administrator"
                 ));
             }
+            if raise {
+                // Windows ignores HWND_TOP for another process's window while
+                // that process is not in the foreground; passing through
+                // topmost lifts it above every ordinary window all the same.
+                let keep = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+                SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, keep);
+                SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, keep);
+            }
         }
-        self.checks.retain(|(other, _)| *other != id);
-        self.checks.push((id, std::time::Instant::now() + SETTLE));
+        self.checks.retain(|(other, _, _)| *other != id);
+        self.checks
+            .push((id, std::time::Instant::now() + SETTLE, rect));
         Ok(())
     }
 

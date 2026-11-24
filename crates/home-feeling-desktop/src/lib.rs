@@ -38,6 +38,8 @@ pub enum RawEvent {
     Closed(Id),
     Focused(Id),
     Moved(Id, Rect),
+    /// The frame a window settled at after the move to `requested`.
+    Settled(Id, Rect, Rect),
     /// The user ended a drag or resize of the window.
     Dragged(Id, Rect),
     Maximized(Id, bool),
@@ -50,7 +52,9 @@ pub enum RawEvent {
 pub trait Backend: Send {
     fn snapshot(&mut self) -> Snapshot;
     fn poll(&mut self) -> Vec<RawEvent>;
-    fn move_window(&mut self, id: Id, rect: Rect) -> Result<(), String>;
+    /// Moves a window; `raise` also brings it in front of other windows,
+    /// without focusing it.
+    fn move_window(&mut self, id: Id, rect: Rect, raise: bool) -> Result<(), String>;
     fn focus(&mut self, id: Id) -> Result<(), String>;
     fn register_hotkey(&mut self, key: u32, hotkey: Hotkey) -> Result<(), String>;
     fn unregister_hotkey(&mut self, key: u32);
@@ -72,7 +76,7 @@ impl Backend for Unsupported {
     fn poll(&mut self) -> Vec<RawEvent> {
         Vec::new()
     }
-    fn move_window(&mut self, _: Id, _: Rect) -> Result<(), String> {
+    fn move_window(&mut self, _: Id, _: Rect, _: bool) -> Result<(), String> {
         Err("window management is not supported on this platform".into())
     }
     fn focus(&mut self, _: Id) -> Result<(), String> {
@@ -220,7 +224,9 @@ impl Desktop {
             }
             "desktop/windows/move" => {
                 let request: MoveRequest = serde_json::from_slice(payload).map_err(parse_error)?;
-                state.backend.move_window(request.id, request.rect)?;
+                state
+                    .backend
+                    .move_window(request.id, request.rect, request.raise)?;
             }
             "desktop/windows/focus" => {
                 let request: IdOnly = serde_json::from_slice(payload).map_err(parse_error)?;
@@ -285,6 +291,12 @@ impl Desktop {
             rect: Rect,
         }
         #[derive(Serialize)]
+        struct SettledEvent {
+            id: Id,
+            rect: Rect,
+            requested: Rect,
+        }
+        #[derive(Serialize)]
         struct MaximizedEvent {
             id: Id,
             maximized: bool,
@@ -303,6 +315,14 @@ impl Desktop {
             RawEvent::Closed(id) => self.publish("desktop/windows/closed", &IdEvent { id }),
             RawEvent::Focused(id) => self.publish("desktop/windows/focused", &IdEvent { id }),
             RawEvent::Minimized(id) => self.publish("desktop/windows/minimized", &IdEvent { id }),
+            RawEvent::Settled(id, rect, requested) => self.publish(
+                "desktop/windows/settled",
+                &SettledEvent {
+                    id,
+                    rect,
+                    requested,
+                },
+            ),
             RawEvent::Dragged(id, rect) => {
                 self.publish("desktop/windows/dragged", &MovedEvent { id, rect })
             }
