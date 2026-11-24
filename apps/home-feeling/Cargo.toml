@@ -9,7 +9,7 @@ name = "home-feeling-app"
 path = "src/main.rs"
 
 [dependencies]
-bones-kernel = { path = "../../vendor/bones/crates/bones-kernel", default-features = false, features = ["presentation"] }
+bones-kernel = { path = "../../vendor/bones/crates/bones-kernel", default-features = false, features = ["presentation", "upgrade", "desktop"] }
 # bones links SDL3; building it from source statically keeps the app one file.
 sdl3 = { version = "0.18.4", features = ["build-from-source-static", "unsafe_textures"] }
 bones-consent = { path = "../../crates/bones-consent" }

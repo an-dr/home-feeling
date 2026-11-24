@@ -10,10 +10,12 @@ use bones_kernel::messages::ui::kinds::{
     Button, Checkbox, Heading, Label, Selectable, Separator, Strong, Weak,
 };
 use bones_kernel::messages::ui::{Event, Layout, Node, PanelSide, Root, Spec, WidgetProps};
+use bones_kernel::messages::upgrader::Action;
 use bones_kernel::ui::{Frame, UiView};
 use bones_kernel::window_control::WindowControl;
 use bones_module_lua::{GuestState, LuaControl, Permissions};
 
+use crate::installation::{self, UpdateState};
 use crate::settings::Settings;
 use crate::tray::{Tray, TrayAction};
 
@@ -22,19 +24,33 @@ pub const NAME: &str = "home-feeling";
 
 const RELOAD: u32 = 1;
 const OPEN_FOLDER: u32 = 2;
+const CHECK_UPDATE: u32 = 3;
+const STAGE_UPDATE: u32 = 4;
+const INSTALL: u32 = 5;
+const UNREGISTER: u32 = 6;
 /// Each Thing's row owns ten ids from here: select, allow, refuse, enable.
 const ROWS: u32 = 1000;
 const SELECT: u32 = 0;
 const PROMPT: u32 = 0; // the prompt's buttons are +1 (allow) and +2 (refuse)
 const ENABLE: u32 = 3;
 
+/// The channels to the update bridge, which talks to the bones upgrade module.
+pub struct Updates {
+    pub requests: std::sync::mpsc::Sender<Action>,
+    pub results: std::sync::mpsc::Receiver<UpdateState>,
+}
+
 pub struct ThingsWindow {
+    updates: Updates,
+    update: Option<UpdateState>,
     control: LuaControl,
     consent: Consent,
     settings: Settings,
     things_dir: PathBuf,
     /// Each Thing's manifest as last read, or why it could not be read.
     manifests: HashMap<String, Result<Manifest, String>>,
+    /// The deny-list last given to the host per Thing.
+    denied: HashMap<String, Vec<String>>,
     /// The Thing names in row order at the last frame.
     rows: Vec<String>,
     selected: Option<String>,
@@ -53,13 +69,18 @@ impl ThingsWindow {
         settings: Settings,
         things_dir: PathBuf,
         offered: Vec<String>,
+        denied: HashMap<String, Vec<String>>,
+        updates: Updates,
     ) -> Self {
         Self {
+            updates,
+            update: None,
             control,
             consent,
             settings,
             things_dir,
             manifests: HashMap::new(),
+            denied,
             rows: Vec::new(),
             selected: None,
             offered,
@@ -93,7 +114,10 @@ impl ThingsWindow {
             let name = record.name;
             if let Ok(manifest) = self.manifest(&name) {
                 let deny = self.consent.deny_list(&name, &manifest);
-                self.control.set_permissions(&name, Permissions::deny(deny));
+                if self.denied.get(&name) != Some(&deny) {
+                    self.denied.insert(name.clone(), deny.clone());
+                    self.control.set_permissions(&name, Permissions::deny(deny));
+                }
                 if self.consent.status(&name, &manifest) == Status::Pending {
                     self.control.stop(&name);
                 }
@@ -200,6 +224,8 @@ impl ThingsWindow {
                 .node(0),
             );
         }
+        children.push(Separator.node(0));
+        children.extend(self.app_section());
         Node::container(
             Layout::Panel {
                 side: PanelSide::Left,
@@ -316,6 +342,89 @@ impl ThingsWindow {
     }
 }
 
+impl ThingsWindow {
+    /// Version, updates, and installation (UC-INSTALL, UC-UPDATE).
+    fn app_section(&mut self) -> Vec<Node> {
+        while let Ok(state) = self.updates.results.try_recv() {
+            if state == UpdateState::Installed {
+                self.notice = Some(match installation::register() {
+                    Ok(()) => "Installed. Start home-feeling from your application list.".into(),
+                    Err(err) => format!("Installed, but not added to the application list: {err}"),
+                });
+            }
+            self.update = Some(state);
+        }
+        let mut nodes = vec![Weak {
+            text: format!("{} {}", installation::NAME, installation::VERSION),
+        }
+        .node(0)];
+        if !installation::running_installed() {
+            nodes.push(Button::new("Install").node(INSTALL));
+            return nodes;
+        }
+        match &self.update {
+            Some(UpdateState::Available(version)) => {
+                nodes.push(Button::new(format!("Update to {version}")).node(STAGE_UPDATE))
+            }
+            Some(UpdateState::Staged(version)) => nodes.push(
+                Label {
+                    text: format!("{version} is ready; restart the app to use it."),
+                }
+                .node(0),
+            ),
+            Some(UpdateState::UpToDate) => {
+                nodes.push(
+                    Weak {
+                        text: "Up to date.".into(),
+                    }
+                    .node(0),
+                );
+                nodes.push(Button::new("Check for updates").node(CHECK_UPDATE));
+            }
+            Some(UpdateState::Failed(reason)) => {
+                nodes.push(
+                    Label {
+                        text: format!("Update failed: {reason}"),
+                    }
+                    .node(0),
+                );
+                nodes.push(Button::new("Check for updates").node(CHECK_UPDATE));
+            }
+            _ => nodes.push(Button::new("Check for updates").node(CHECK_UPDATE)),
+        }
+        if installation::is_registered() {
+            nodes.push(Button::new("Unregister").node(UNREGISTER));
+        }
+        nodes
+    }
+
+    fn app_action(&mut self, id: u32) {
+        match id {
+            CHECK_UPDATE => {
+                self.update = None;
+                let _ = self.updates.requests.send(Action::Check);
+            }
+            STAGE_UPDATE => {
+                let _ = self.updates.requests.send(Action::Stage);
+            }
+            INSTALL => {
+                self.notice = Some("Installing...".into());
+                let _ = self.updates.requests.send(Action::Install);
+            }
+            UNREGISTER => {
+                self.notice = Some(match installation::unregister() {
+                    Ok(()) => format!(
+                        "Removed from the application list. Delete {} to finish; your Things folder stays.",
+                        installation::install_dir().unwrap_or_default().display()
+                    ),
+                    Err(err) => format!("Could not unregister: {err}"),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
 impl UiView for ThingsWindow {
     fn init(&mut self, ctx: &mut bones_kernel::bus::ModuleContext) -> Result<(), String> {
         self.window = ctx.get_service::<WindowControl>().cloned();
@@ -337,6 +446,7 @@ impl UiView for ThingsWindow {
                     self.notice = Some(format!("Could not open the folder: {err}"));
                 }
             }
+            CHECK_UPDATE | STAGE_UPDATE | INSTALL | UNREGISTER => self.app_action(id),
             id if id >= ROWS => {
                 let index = ((id - ROWS) / 10) as usize;
                 let Some(thing) = self.rows.get(index).cloned() else {
