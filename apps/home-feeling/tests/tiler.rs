@@ -7,7 +7,7 @@ use bones_kernel::bus::{Bus, Envelope, Handler, Module, ModuleContext, Registry,
 use bones_kernel::logging::Logger;
 use bones_module_lua::{GuestState, LuaControl, LuaHost};
 use home_feeling_desktop::protocol::{
-    Capabilities, Id, Monitor, Overlay, Rect, Snapshot, WindowInfo,
+    Capabilities, Id, Monitor, Overlay, Point, Rect, Snapshot, WindowInfo,
 };
 use home_feeling_desktop::{Backend, Desktop, Hotkey, RawEvent, Unsupported};
 
@@ -25,6 +25,8 @@ struct Screen {
     moves: Vec<(Id, Rect)>,
     hotkeys: Vec<(u32, Hotkey)>,
     overlay: Option<Rect>,
+    overlays: std::collections::HashMap<u32, (Rect, String)>,
+    minimized: Vec<Id>,
     /// Sizes windows refuse to go below, as real apps do.
     minimums: std::collections::HashMap<Id, (i32, i32)>,
 }
@@ -76,11 +78,34 @@ impl Backend for Fake {
         Ok(())
     }
     fn unregister_hotkey(&mut self, _: u32) {}
-    fn set_overlay(&mut self, _: u32, overlay: &Overlay) {
-        self.0.lock().unwrap().overlay = Some(overlay.rect);
+    fn set_overlay(&mut self, key: u32, overlay: &Overlay) {
+        let mut screen = self.0.lock().unwrap();
+        if overlay.color == "#2f6f5e" && overlay.width == 3 {
+            screen.overlay = Some(overlay.rect);
+        }
+        screen
+            .overlays
+            .insert(key, (overlay.rect, overlay.color.clone()));
     }
-    fn clear_overlay(&mut self, _: u32) {
-        self.0.lock().unwrap().overlay = None;
+    fn clear_overlay(&mut self, key: u32) {
+        let mut screen = self.0.lock().unwrap();
+        if let Some((rect, _)) = screen.overlays.remove(&key) {
+            if screen.overlay == Some(rect) {
+                screen.overlay = None;
+            }
+        }
+    }
+    fn minimize(&mut self, id: Id) -> Result<(), String> {
+        let mut screen = self.0.lock().unwrap();
+        screen.minimized.push(id);
+        screen.pending.push(RawEvent::Minimized(id));
+        Ok(())
+    }
+    fn restore(&mut self, id: Id) -> Result<(), String> {
+        let mut screen = self.0.lock().unwrap();
+        screen.minimized.retain(|m| *m != id);
+        screen.pending.push(RawEvent::Opened(window(id)));
+        Ok(())
     }
 }
 
@@ -136,6 +161,8 @@ fn world(backend: Option<Box<dyn Backend>>, initial: &[Id]) -> World {
     for topic in [
         "desktop/windows/move",
         "desktop/windows/focus",
+        "desktop/windows/minimize",
+        "desktop/windows/restore",
         "desktop/hotkeys/*",
         "desktop/overlay/*",
         "core/lifecycle",
@@ -247,7 +274,7 @@ fn existing_windows_are_tiled_side_by_side_with_gaps() {
             h: 784
         }
     );
-    assert_eq!(world.screen.lock().unwrap().hotkeys.len(), 9);
+    assert_eq!(world.screen.lock().unwrap().hotkeys.len(), 10);
 }
 
 #[test]
@@ -265,27 +292,6 @@ fn a_new_window_splits_the_focused_tile_along_its_longer_side() {
             h: 388
         }
     );
-    assert_eq!(
-        moves[&3],
-        Rect {
-            x: 504,
-            y: 404,
-            w: 488,
-            h: 388
-        }
-    );
-}
-
-#[test]
-fn a_window_whose_tile_would_be_too_small_floats() {
-    let mut world = world(None, &[1, 2]);
-    world.event(RawEvent::Focused(2));
-    world.event(RawEvent::Opened(window(3)));
-    world.event(RawEvent::Focused(3));
-    // 3's tile is 488x388; split side by side it would be 240 wide, under 400.
-    world.event(RawEvent::Opened(window(4)));
-    let moves = world.last_moves();
-    assert!(!moves.contains_key(&4), "{moves:?}");
     assert_eq!(
         moves[&3],
         Rect {
@@ -324,33 +330,6 @@ fn the_focus_border_follows_the_focused_tile() {
             w: 488,
             h: 784
         })
-    );
-}
-
-#[test]
-fn hotkeys_swap_and_toggle_float() {
-    let mut world = world(None, &[1, 2]);
-    world.event(RawEvent::Focused(1));
-    world.press("alt+shift+right");
-    assert_eq!(
-        world.last_moves()[&1],
-        Rect {
-            x: 504,
-            y: 8,
-            w: 488,
-            h: 784
-        }
-    );
-    world.press("alt+shift+space");
-    // 1 floats; 2 takes the whole area.
-    assert_eq!(
-        world.last_moves()[&2],
-        Rect {
-            x: 8,
-            y: 8,
-            w: 984,
-            h: 784
-        }
     );
 }
 
@@ -415,73 +394,6 @@ fn a_window_that_refuses_its_tile_gets_a_wider_one_when_there_is_room() {
 }
 
 #[test]
-fn the_window_that_needs_more_room_floats_rather_than_squeeze_another() {
-    let mut world = world(None, &[1]);
-    let mut screen = world.screen.lock().unwrap();
-    screen.minimums.insert(1, (600, 0));
-    screen.minimums.insert(2, (450, 0));
-    drop(screen);
-    world.event(RawEvent::Moved(
-        1,
-        Rect {
-            x: 8,
-            y: 8,
-            w: 984,
-            h: 784,
-        },
-    ));
-    world.event(RawEvent::Opened(window(2)));
-    // 1 refuses 488 and needs 600, which would leave 2 only 376, under the
-    // 400 minimum: 1 floats, centred, and 2 takes the whole area.
-    let log = world.tiler_log();
-    assert!(log.iter().any(|l| l.contains("floating w1")), "{log:?}");
-    let moves = world.last_moves();
-    assert_eq!(
-        moves[&2],
-        Rect {
-            x: 8,
-            y: 8,
-            w: 984,
-            h: 784
-        }
-    );
-    assert_eq!(
-        moves[&1],
-        Rect {
-            x: 200,
-            y: 8,
-            w: 600,
-            h: 784
-        }
-    );
-}
-
-#[test]
-fn a_window_that_refuses_its_tile_floats_and_the_rest_retile() {
-    let mut world = world(None, &[1]);
-    world.screen.lock().unwrap().minimums.insert(2, (700, 0));
-    world.event(RawEvent::Opened(window(2)));
-    // 2 got a 488-wide tile, came out 700 wide, and floated: 1 has it all.
-    assert_eq!(
-        world.last_moves()[&1],
-        Rect {
-            x: 8,
-            y: 8,
-            w: 984,
-            h: 784
-        }
-    );
-    assert!(
-        world
-            .tiler_log()
-            .iter()
-            .any(|l| l.contains("needs at least 700x784")),
-        "{:?}",
-        world.tiler_log()
-    );
-}
-
-#[test]
 fn dragging_the_edge_between_two_tiles_moves_the_split() {
     let mut world = world(None, &[1, 2]);
     world.screen.lock().unwrap().moves.clear();
@@ -494,6 +406,7 @@ fn dragging_the_edge_between_two_tiles_moves_the_split() {
             w: 560,
             h: 784,
         },
+        Point { x: 0, y: 0 },
     ));
     // 1 is already where the user put it; only its neighbour moves.
     let moves = world.last_moves();
@@ -520,6 +433,7 @@ fn a_drag_never_squeezes_the_neighbour_below_its_minimum() {
             w: 900,
             h: 784,
         },
+        Point { x: 0, y: 0 },
     ));
     // 2 keeps the 400 minimum; 1 gets the rest.
     let moves = world.last_moves();
@@ -555,6 +469,7 @@ fn moving_a_tiled_window_snaps_it_back() {
             w: 488,
             h: 784,
         },
+        Point { x: 0, y: 0 },
     ));
     assert_eq!(
         world.last_moves()[&1],
@@ -595,4 +510,251 @@ fn the_border_follows_the_real_frame() {
     };
     world.event(RawEvent::Moved(1, real));
     assert_eq!(world.screen.lock().unwrap().overlay, Some(real));
+}
+
+fn at(x: i32, y: i32) -> Point {
+    Point { x, y }
+}
+
+#[test]
+fn a_new_window_splits_another_tile_when_the_focused_one_is_too_small() {
+    let mut world = world(None, &[1, 2]);
+    world.event(RawEvent::Focused(2));
+    world.event(RawEvent::Opened(window(3)));
+    world.event(RawEvent::Focused(3));
+    // 3's tile is 488x388; a split would leave 240 wide, under 400. 1's tile
+    // is the largest and splits instead; nothing stacks.
+    world.event(RawEvent::Opened(window(4)));
+    let moves = world.last_moves();
+    assert_eq!(
+        moves[&4],
+        Rect {
+            x: 8,
+            y: 404,
+            w: 488,
+            h: 388
+        }
+    );
+    assert!(world.screen.lock().unwrap().minimized.is_empty());
+}
+
+#[test]
+fn a_window_that_refuses_its_tile_joins_a_stack_where_it_fits() {
+    let mut world = world(None, &[1]);
+    world.screen.lock().unwrap().minimums.insert(2, (700, 0));
+    world.event(RawEvent::Opened(window(2)));
+    // 2 needs 700, which would leave 1 only 276: 2 shares 1's whole tile.
+    assert_eq!(
+        world.last_moves()[&2],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 984,
+            h: 784
+        }
+    );
+    assert_eq!(world.screen.lock().unwrap().minimized, vec![1]);
+}
+
+#[test]
+fn stack_next_shows_the_other_member_and_closing_one_shows_the_rest() {
+    let mut world = world(None, &[1]);
+    world.screen.lock().unwrap().minimums.insert(2, (700, 0));
+    world.event(RawEvent::Opened(window(2)));
+    world.event(RawEvent::Focused(2));
+    world.press("alt+shift+n");
+    assert_eq!(world.screen.lock().unwrap().minimized, vec![2]);
+    world.event(RawEvent::Closed(1));
+    // 2 comes back to the whole tile.
+    assert!(world.screen.lock().unwrap().minimized.is_empty());
+}
+
+#[test]
+fn a_stack_shows_a_tab_strip_over_its_tile() {
+    let mut world = world(None, &[1]);
+    world.screen.lock().unwrap().minimums.insert(2, (700, 0));
+    world.event(RawEvent::Opened(window(2)));
+    let screen = world.screen.lock().unwrap();
+    let tabs: Vec<&Rect> = screen
+        .overlays
+        .values()
+        .filter(|(r, _)| r.h == 0)
+        .map(|(r, _)| r)
+        .collect();
+    assert_eq!(tabs.len(), 2, "{:?}", screen.overlays);
+}
+
+#[test]
+fn swap_and_toggle_float_by_hotkey_with_a_cyan_frame() {
+    let mut world = world(None, &[1, 2]);
+    world.event(RawEvent::Focused(1));
+    world.press("alt+shift+right");
+    assert_eq!(
+        world.last_moves()[&1],
+        Rect {
+            x: 504,
+            y: 8,
+            w: 488,
+            h: 784
+        }
+    );
+    world.press("alt+shift+space");
+    // 1 floats: 2 takes the whole area, 1 is framed in cyan.
+    assert_eq!(
+        world.last_moves()[&2],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 984,
+            h: 784
+        }
+    );
+    let screen = world.screen.lock().unwrap();
+    assert!(
+        screen.overlays.values().any(|(_, c)| c == "#00bcd4"),
+        "{:?}",
+        screen.overlays
+    );
+}
+
+#[test]
+fn dropping_near_a_tile_edge_splits_that_tile_on_that_side() {
+    let mut world = world(None, &[1, 2]);
+    let start = Rect {
+        x: 504,
+        y: 8,
+        w: 488,
+        h: 784,
+    };
+    world.event(RawEvent::DragStarted(2, at(700, 20)));
+    world.event(RawEvent::Dragging(2, Rect { x: 100, ..start }, at(20, 400)));
+    world.event(RawEvent::Dragged(2, Rect { x: 100, ..start }, at(20, 400)));
+    // Dropped near 1's left edge: 2 goes left of 1.
+    let moves = world.last_moves();
+    assert_eq!(
+        moves[&2],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 488,
+            h: 784
+        }
+    );
+    assert_eq!(
+        moves[&1],
+        Rect {
+            x: 504,
+            y: 8,
+            w: 488,
+            h: 784
+        }
+    );
+}
+
+#[test]
+fn dropping_near_the_bottom_stacks_the_tiles_vertically() {
+    let mut world = world(None, &[1, 2]);
+    let start = Rect {
+        x: 504,
+        y: 8,
+        w: 488,
+        h: 784,
+    };
+    world.event(RawEvent::DragStarted(2, at(700, 20)));
+    world.event(RawEvent::Dragging(
+        2,
+        Rect { x: 100, ..start },
+        at(250, 780),
+    ));
+    world.event(RawEvent::Dragged(2, Rect { x: 100, ..start }, at(250, 780)));
+    let moves = world.last_moves();
+    assert_eq!(
+        moves[&1],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 984,
+            h: 388
+        }
+    );
+    assert_eq!(
+        moves[&2],
+        Rect {
+            x: 8,
+            y: 404,
+            w: 984,
+            h: 388
+        }
+    );
+}
+
+#[test]
+fn dropping_in_the_middle_of_a_tile_swaps() {
+    let mut world = world(None, &[1, 2]);
+    let start = Rect {
+        x: 504,
+        y: 8,
+        w: 488,
+        h: 784,
+    };
+    world.event(RawEvent::DragStarted(2, at(700, 20)));
+    world.event(RawEvent::Dragging(
+        2,
+        Rect { x: 100, ..start },
+        at(250, 400),
+    ));
+    world.event(RawEvent::Dragged(2, Rect { x: 100, ..start }, at(250, 400)));
+    let moves = world.last_moves();
+    assert_eq!(
+        moves[&2],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 488,
+            h: 784
+        }
+    );
+    assert_eq!(
+        moves[&1],
+        Rect {
+            x: 504,
+            y: 8,
+            w: 488,
+            h: 784
+        }
+    );
+}
+
+#[test]
+fn a_drag_previews_the_drop_and_clears_it_after() {
+    let mut world = world(None, &[1, 2]);
+    let start = Rect {
+        x: 504,
+        y: 8,
+        w: 488,
+        h: 784,
+    };
+    world.event(RawEvent::DragStarted(2, at(700, 20)));
+    world.event(RawEvent::Dragging(2, Rect { x: 100, ..start }, at(20, 400)));
+    let preview = Rect {
+        x: 8,
+        y: 8,
+        w: 240,
+        h: 784,
+    };
+    assert!(world
+        .screen
+        .lock()
+        .unwrap()
+        .overlays
+        .values()
+        .any(|(r, _)| *r == preview));
+    world.event(RawEvent::Dragged(2, Rect { x: 100, ..start }, at(20, 400)));
+    assert!(!world
+        .screen
+        .lock()
+        .unwrap()
+        .overlays
+        .values()
+        .any(|(r, _)| *r == preview));
 }
