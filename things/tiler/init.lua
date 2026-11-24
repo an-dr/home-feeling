@@ -1,18 +1,24 @@
 -- The tiler: a dwindle layout per monitor (UC-TILE-01 to 05).
 --
 -- Each monitor holds a tree. A leaf is one window; a split divides its area
--- between two children, side by side ("h") or stacked ("v"). A new window
--- splits the focused tile along its longer side. Everything happens through
--- the desktop module's bus topics.
+-- between two children, side by side ("h") or stacked ("v"), at a ratio. A
+-- new window splits the focused tile along its longer side. Everything
+-- happens through the desktop module's bus topics.
 
 local QUERY = "desktop/windows/query"
 
-local windows = {}  -- id -> window info, as the desktop module reports it
-local floating = {} -- id -> true for windows left at their own size
-local trees = {}    -- monitor id -> root node
-local monitors = {} -- monitor id -> monitor
-local placed = {}   -- id -> rect the last layout gave it
+local windows = {}   -- id -> window info, with the real frame in .rect
+local floating = {}  -- id -> true for windows left at their own size
+local maximized = {} -- id -> true while the user has it maximized
+local minimum = {}   -- id -> { w, h } a window refused to go below
+local pending = {}   -- id -> true until the first frame after our move
+local trees = {}     -- monitor id -> root node
+local monitors = {}  -- monitor id -> monitor
+local placed = {}    -- id -> rect the last layout gave it
 local focused = nil
+
+-- How far a frame may differ from its tile before it counts as different.
+local SLACK = 4
 
 local function key(id)
   -- Ids are integers; keep them as table keys of one type.
@@ -32,23 +38,27 @@ local BORDER = setting("border", { enabled = true, color = "#2f6f5e", width = 3 
 
 -- Layout -------------------------------------------------------------------
 
-local function split_rect(rect, dir)
+local function split_rect(rect, dir, ratio)
+  ratio = ratio or 0.5
   if dir == "h" then
-    local wa = (rect.w - GAP) // 2
+    local wa = math.floor((rect.w - GAP) * ratio)
     return { x = rect.x, y = rect.y, w = wa, h = rect.h },
            { x = rect.x + wa + GAP, y = rect.y, w = rect.w - wa - GAP, h = rect.h }
   end
-  local ha = (rect.h - GAP) // 2
+  local ha = math.floor((rect.h - GAP) * ratio)
   return { x = rect.x, y = rect.y, w = rect.w, h = ha },
          { x = rect.x, y = rect.y + ha + GAP, w = rect.w, h = rect.h - ha - GAP }
 end
 
+-- Fills `out` with each window's rect and remembers each node's own rect,
+-- which a resize needs to turn an edge into a ratio.
 local function layout(node, rect, out)
+  node.rect = rect
   if node.window then
     out[node.window] = rect
     return
   end
-  local a, b = split_rect(rect, node.split)
+  local a, b = split_rect(rect, node.split, node.ratio)
   layout(node.a, a, out)
   layout(node.b, b, out)
 end
@@ -68,9 +78,30 @@ local function find(node, id, parent)
   return find(node.b, id, node)
 end
 
+-- The splits from the root down to the window's leaf, each with the side
+-- ("a" or "b") the window is on.
+local function path_to(node, id, path)
+  path = path or {}
+  if node.window then
+    if node.window == id then return path end
+    return nil
+  end
+  for _, side in ipairs({ "a", "b" }) do
+    table.insert(path, { node = node, side = side })
+    if path_to(node[side], id, path) then return path end
+    table.remove(path)
+  end
+  return nil
+end
+
 local function last_leaf(node)
   while not node.window do node = node.b end
   return node
+end
+
+local function same(a, b)
+  return a and b and math.abs(a.x - b.x) <= SLACK and math.abs(a.y - b.y) <= SLACK
+    and math.abs(a.w - b.w) <= SLACK and math.abs(a.h - b.h) <= SLACK
 end
 
 local function apply()
@@ -83,7 +114,10 @@ local function apply()
   end
   for id, rect in pairs(placed) do
     local window = windows[id]
-    if window then
+    -- A maximized window stays maximized; one already in place stays put,
+    -- unless a move is still on its way and its known frame is stale.
+    if window and not maximized[id] and (pending[id] or not same(window.rect, rect)) then
+      pending[id] = true
       bones.publish("desktop/windows/move", { id = window.id, rect = rect })
     end
   end
@@ -91,6 +125,8 @@ end
 
 -- Focus border -------------------------------------------------------------
 
+-- Drawn around the window's real frame, which differs from its tile while
+-- the window is maximized or still moving.
 local function update_border()
   if not BORDER.enabled then return end
   local window = focused and windows[focused]
@@ -98,9 +134,8 @@ local function update_border()
     bones.publish("desktop/overlay/clear", { id = "focus" })
     return
   end
-  local rect = placed[focused] or window.rect
   bones.publish("desktop/overlay/set", {
-    id = "focus", rect = rect, color = BORDER.color, width = BORDER.width,
+    id = "focus", rect = window.rect, color = BORDER.color, width = BORDER.width,
   })
 end
 
@@ -112,6 +147,13 @@ local function monitor_of(window)
   return next(monitors)
 end
 
+-- Whether `id` fits `rect`: the configured minimum, and the size the window
+-- itself refused to go below, if it ever did.
+local function fits(id, rect)
+  local own = minimum[id] or { w = 0, h = 0 }
+  return rect.w >= math.max(MIN_W, own.w) and rect.h >= math.max(MIN_H, own.h)
+end
+
 -- Adds a window to its monitor's tree, or floats it when its tile would be
 -- smaller than the minimum (UC-TILE-02). Returns whether it was tiled.
 local function insert(id)
@@ -120,8 +162,7 @@ local function insert(id)
   if not monitor_id then return false end
   local tree = trees[monitor_id]
   if not tree then
-    local rect = area(monitors[monitor_id])
-    if rect.w < MIN_W or rect.h < MIN_H then
+    if not fits(id, area(monitors[monitor_id])) then
       floating[id] = true
       return false
     end
@@ -134,13 +175,14 @@ local function insert(id)
   layout(tree, area(monitors[monitor_id]), rects)
   local rect = rects[target.window]
   local dir = rect.w >= rect.h and "h" or "v"
-  local _, new = split_rect(rect, dir)
-  if new.w < MIN_W or new.h < MIN_H then
+  local kept, new = split_rect(rect, dir)
+  if not fits(id, new) or not fits(target.window, kept) then
     floating[id] = true
     bones.debug("floating " .. window.title .. ": its tile would be " .. new.w .. "x" .. new.h)
     return false
   end
-  target.split, target.a, target.b = dir, { window = target.window }, { window = id }
+  target.split, target.ratio = dir, 0.5
+  target.a, target.b = { window = target.window }, { window = id }
   target.window = nil
   floating[id] = nil
   return true
@@ -154,7 +196,8 @@ local function remove(id)
         trees[monitor_id] = nil
       else
         local sibling = parent.a == leaf and parent.b or parent.a
-        parent.window, parent.split, parent.a, parent.b = sibling.window, sibling.split, sibling.a, sibling.b
+        parent.window, parent.split, parent.ratio = sibling.window, sibling.split, sibling.ratio
+        parent.a, parent.b = sibling.a, sibling.b
       end
       return true
     end
@@ -167,6 +210,64 @@ local function tiled(id)
     if find(tree, id) then return true end
   end
   return false
+end
+
+local function path_of(id)
+  for _, tree in pairs(trees) do
+    local path = path_to(tree, id)
+    if path then return path end
+  end
+  return nil
+end
+
+-- A tiled window came out larger than its tile: the app has a minimum size.
+-- Remember it, float the window, and give its space to the others.
+local function refused(id, rect)
+  minimum[id] = { w = rect.w, h = rect.h }
+  remove(id)
+  floating[id] = true
+  bones.info("floating " .. windows[id].title .. ": it needs at least " .. rect.w .. "x" .. rect.h)
+  apply()
+end
+
+-- The user dragged an edge of a tiled window: move the split that edge
+-- belongs to. Any other drag snaps the window back into its tile.
+local function resized(id, rect)
+  local tile = placed[id]
+  local path = path_of(id)
+  if tile and path then
+    local edges = {
+      { dir = "h", side = "a", moved = math.abs((rect.x + rect.w) - (tile.x + tile.w)) > SLACK,
+        size = function(r) return rect.x + rect.w - r.x end },
+      { dir = "h", side = "b", moved = math.abs(rect.x - tile.x) > SLACK,
+        size = function(r) return rect.x - GAP - r.x end },
+      { dir = "v", side = "a", moved = math.abs((rect.y + rect.h) - (tile.y + tile.h)) > SLACK,
+        size = function(r) return rect.y + rect.h - r.y end },
+      { dir = "v", side = "b", moved = math.abs(rect.y - tile.y) > SLACK,
+        size = function(r) return rect.y - GAP - r.y end },
+    }
+    -- A move keeps the size: snap back without touching any split.
+    local resizing = math.abs(rect.w - tile.w) > SLACK or math.abs(rect.h - tile.h) > SLACK
+    if resizing then
+      for _, edge in ipairs(edges) do
+        if edge.moved then
+          -- The nearest split along this axis with the window on that side.
+          for i = #path, 1, -1 do
+            local step = path[i]
+            if step.node.split == edge.dir and step.side == edge.side then
+              local r = step.node.rect
+              local span = (edge.dir == "h" and r.w or r.h) - GAP
+              local ratio = edge.size(r) / span
+              step.node.ratio = math.min(0.9, math.max(0.1, ratio))
+              break
+            end
+          end
+        end
+      end
+    end
+  end
+  apply()
+  update_border()
 end
 
 -- Directions ---------------------------------------------------------------
@@ -230,8 +331,12 @@ function actions.toggle_float()
   if tiled(focused) then
     remove(focused)
     floating[focused] = true
-  elseif not insert(focused) then
-    bones.info("no room to tile " .. windows[focused].title)
+  else
+    -- Toggling back in is a request to try again, whatever it refused before.
+    minimum[focused] = nil
+    if not insert(focused) then
+      bones.info("no room to tile " .. windows[focused].title)
+    end
   end
   apply()
   update_border()
@@ -246,47 +351,64 @@ local function load_monitors(list)
   end
 end
 
-local function on_opened(window)
-  local id = key(window.id)
-  if window.minimized then return end
-  local known = windows[id] ~= nil
-  windows[id] = window
-  if not known or not (tiled(id) or floating[id]) then
-    insert(id)
-    apply()
-  end
-end
-
-local function on_gone(id)
-  if remove(id) then apply() end
-  windows[id] = nil
-  floating[id] = nil
+local function forget(id)
+  local was_tiled = remove(id)
+  windows[id], floating[id], maximized[id], pending[id] = nil, nil, nil, nil
+  if was_tiled then apply() end
   if focused == id then
     focused = nil
     update_border()
   end
 end
 
+local function on_opened(window)
+  local id = key(window.id)
+  if window.minimized then return end
+  local known = windows[id] ~= nil
+  windows[id] = window
+  if window.maximized then maximized[id] = true end
+  if not known or not (tiled(id) or floating[id]) then
+    insert(id)
+    apply()
+  end
+end
+
+local function on_moved(event)
+  local id = key(event.id)
+  local window = windows[id]
+  if not window then return end
+  window.rect = event.rect
+  if pending[id] then
+    pending[id] = nil
+    local tile = placed[id]
+    if tile and tiled(id) and not maximized[id]
+      and (event.rect.w > tile.w + SLACK or event.rect.h > tile.h + SLACK) then
+      refused(id, event.rect)
+    end
+  end
+  if id == focused then update_border() end
+end
+
 local handlers = {
   ["desktop/windows/opened"] = on_opened,
-  ["desktop/windows/closed"] = function(event) on_gone(key(event.id)) end,
-  ["desktop/windows/minimized"] = function(event)
-    local id = key(event.id)
-    if remove(id) then apply() end
-    if windows[id] then windows[id].minimized = true end
-    windows[id] = nil
-    if focused == id then focused = nil; update_border() end
-  end,
+  ["desktop/windows/closed"] = function(event) forget(key(event.id)) end,
+  ["desktop/windows/minimized"] = function(event) forget(key(event.id)) end,
   ["desktop/windows/focused"] = function(event)
     focused = key(event.id)
     update_border()
   end,
-  ["desktop/windows/moved"] = function(event)
+  ["desktop/windows/moved"] = on_moved,
+  ["desktop/windows/dragged"] = function(event)
     local id = key(event.id)
-    if windows[id] then
-      windows[id].rect = event.rect
-      if id == focused and not placed[id] then update_border() end
-    end
+    if windows[id] then windows[id].rect = event.rect end
+    if tiled(id) and not maximized[id] then resized(id, event.rect) end
+  end,
+  ["desktop/windows/maximized"] = function(event)
+    local id = key(event.id)
+    if not windows[id] then return end
+    maximized[id] = event.maximized or nil
+    if not event.maximized then apply() end
+    update_border()
   end,
   ["desktop/monitors/changed"] = function(event)
     load_monitors(event.monitors)
@@ -336,6 +458,7 @@ function init()
   table.sort(list, function(a, b) return a.id < b.id end)
   for _, window in ipairs(list) do
     windows[key(window.id)] = window
+    if window.maximized then maximized[key(window.id)] = true end
   end
   focused = snapshot.focused and key(snapshot.focused) or nil
   for _, window in ipairs(list) do
