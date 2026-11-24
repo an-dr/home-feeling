@@ -4,13 +4,15 @@
 //! - `desktop/windows/opened` [`WindowInfo`]
 //! - `desktop/windows/closed`, `focused`, `minimized` `{ "id" }`
 //! - `desktop/windows/moved` `{ "id", "rect" }`, after any change of position or size
+//! - `desktop/windows/settled` `{ "id", "rect", "requested" }`, the frame a window took
+//!   after a requested move, sent whether or not it changed
 //! - `desktop/windows/dragged` `{ "id", "rect" }`, when the user ends a drag or resize
 //! - `desktop/windows/maximized` `{ "id", "maximized" }`, on maximize and restore
 //! - `desktop/monitors/changed` `{ "monitors": [Monitor] }`
 //! - `desktop/hotkeys/pressed` `{ "owner", "id" }`
 //!
 //! It listens on:
-//! - `desktop/windows/move` `{ "id", "rect" }`, `desktop/windows/focus` `{ "id" }`
+//! - `desktop/windows/move` `{ "id", "rect", "raise"? }`; `raise` also brings it to the front, `desktop/windows/focus` `{ "id" }`
 //! - `desktop/hotkeys/register` `{ "id", "keys" }`, `desktop/hotkeys/unregister` `{ "id" }`
 //! - `desktop/overlay/set` `{ "id", "rect", "color", "width" }`, `desktop/overlay/clear` `{ "id" }`
 //!
@@ -106,6 +108,8 @@ pub(crate) struct IdOnly {
 pub(crate) struct MoveRequest {
     pub id: Id,
     pub rect: Rect,
+    #[serde(default)]
+    pub raise: bool,
 }
 
 #[derive(Debug, Deserialize)]

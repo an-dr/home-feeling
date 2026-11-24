@@ -27,7 +27,7 @@ impl Backend for Fake {
     fn poll(&mut self) -> Vec<RawEvent> {
         std::mem::take(&mut self.0.lock().unwrap().pending)
     }
-    fn move_window(&mut self, id: i64, rect: Rect) -> Result<(), String> {
+    fn move_window(&mut self, id: i64, rect: Rect, _: bool) -> Result<(), String> {
         self.0.lock().unwrap().calls.push(format!(
             "move {id} {} {} {} {}",
             rect.x, rect.y, rect.w, rect.h
