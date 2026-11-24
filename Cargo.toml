@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps/home-feeling", "apps/home-feeling-launcher", "crates/bones-module-lua", "crates/bones-consent", "crates/home-feeling-desktop"]
+members = ["apps/home-feeling", "apps/home-feeling-launcher", "crates/bones-module-lua", "crates/bones-consent", "crates/home-feeling-desktop", "xtask"]
 exclude = ["vendor/bones", "vendor/bones/crates/bones-messages"]
 
 # The app and its launcher ship together and must report the same version;
