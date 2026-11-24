@@ -48,9 +48,14 @@ fn run() -> bones_kernel::Result<()> {
     let control = lua.control();
 
     bones_kernel::Kernel::new()
-        .logger(logger)
+        .logger(logger.clone())
         .window("home-feeling", 900, 600)
         .renderer()
+        // Before the Lua host, so Things can query it during their own init.
+        .module(home_feeling_desktop::Desktop::new(
+            logger.clone(),
+            home_feeling_desktop::native_backend(),
+        ))
         .module(lua)
         .ui()
         .module(bones_kernel::ui::ViewModule::new(

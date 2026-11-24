@@ -834,12 +834,24 @@ dependencies = [
  "bones-kernel",
  "bones-module-lua",
  "dirs",
+ "home-feeling-desktop",
  "open",
  "sdl3",
  "serde",
  "serde_json",
  "tempfile",
  "tray-icon",
+]
+
+[[package]]
+name = "home-feeling-desktop"
+version = "0.1.0"
+dependencies = [
+ "bones-kernel-infra",
+ "bones-messages",
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
