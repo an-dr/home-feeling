@@ -25,6 +25,8 @@ struct Screen {
     moves: Vec<(Id, Rect)>,
     hotkeys: Vec<(u32, Hotkey)>,
     overlay: Option<Rect>,
+    /// Sizes windows refuse to go below, as real apps do.
+    minimums: std::collections::HashMap<Id, (i32, i32)>,
 }
 
 struct Fake(Arc<Mutex<Screen>>);
@@ -52,7 +54,16 @@ impl Backend for Fake {
         std::mem::take(&mut self.0.lock().unwrap().pending)
     }
     fn move_window(&mut self, id: Id, rect: Rect) -> Result<(), String> {
-        self.0.lock().unwrap().moves.push((id, rect));
+        let mut screen = self.0.lock().unwrap();
+        screen.moves.push((id, rect));
+        // Report the frame the window really took, as Windows does.
+        let (min_w, min_h) = screen.minimums.get(&id).copied().unwrap_or((0, 0));
+        let actual = Rect {
+            w: rect.w.max(min_w),
+            h: rect.h.max(min_h),
+            ..rect
+        };
+        screen.pending.push(RawEvent::Moved(id, actual));
         Ok(())
     }
     fn focus(&mut self, id: Id) -> Result<(), String> {
@@ -85,6 +96,7 @@ fn window(id: Id) -> WindowInfo {
         },
         monitor: 1,
         minimized: false,
+        maximized: false,
     }
 }
 
@@ -358,4 +370,111 @@ fn without_window_management_the_tiler_says_so_and_does_nothing() {
         .find(|r| r.name == "tiler")
         .unwrap();
     assert_eq!(record.state, GuestState::Running);
+}
+
+#[test]
+fn a_window_that_refuses_its_tile_floats_and_the_rest_retile() {
+    let mut world = world(None, &[1]);
+    world.screen.lock().unwrap().minimums.insert(2, (700, 0));
+    world.event(RawEvent::Opened(window(2)));
+    // 2 got a 488-wide tile, came out 700 wide, and floated: 1 has it all.
+    assert_eq!(
+        world.last_moves()[&1],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 984,
+            h: 784
+        }
+    );
+    assert!(
+        world
+            .tiler_log()
+            .iter()
+            .any(|l| l.contains("needs at least 700x784")),
+        "{:?}",
+        world.tiler_log()
+    );
+}
+
+#[test]
+fn dragging_the_edge_between_two_tiles_moves_the_split() {
+    let mut world = world(None, &[1, 2]);
+    world.screen.lock().unwrap().moves.clear();
+    // The user drags 1's right edge from 496 to 696.
+    world.event(RawEvent::Dragged(
+        1,
+        Rect {
+            x: 8,
+            y: 8,
+            w: 688,
+            h: 784,
+        },
+    ));
+    // 1 is already where the user put it; only its neighbour moves.
+    let moves = world.last_moves();
+    assert!(!moves.contains_key(&1), "{moves:?}");
+    assert_eq!(
+        moves[&2],
+        Rect {
+            x: 704,
+            y: 8,
+            w: 288,
+            h: 784
+        }
+    );
+}
+
+#[test]
+fn moving_a_tiled_window_snaps_it_back() {
+    let mut world = world(None, &[1, 2]);
+    world.screen.lock().unwrap().moves.clear();
+    world.event(RawEvent::Dragged(
+        1,
+        Rect {
+            x: 300,
+            y: 200,
+            w: 488,
+            h: 784,
+        },
+    ));
+    assert_eq!(
+        world.last_moves()[&1],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 488,
+            h: 784
+        }
+    );
+}
+
+#[test]
+fn a_maximized_window_is_left_maximized_until_restored() {
+    let mut world = world(None, &[1, 2]);
+    world.event(RawEvent::Maximized(1, true));
+    world.event(RawEvent::Moved(1, WORK));
+    world.screen.lock().unwrap().moves.clear();
+    world.event(RawEvent::Opened(window(3)));
+    assert!(
+        !world.last_moves().contains_key(&1),
+        "{:?}",
+        world.last_moves()
+    );
+    world.event(RawEvent::Maximized(1, false));
+    assert!(world.last_moves().contains_key(&1));
+}
+
+#[test]
+fn the_border_follows_the_real_frame() {
+    let mut world = world(None, &[1, 2]);
+    world.event(RawEvent::Focused(1));
+    let real = Rect {
+        x: 8,
+        y: 8,
+        w: 600,
+        h: 784,
+    };
+    world.event(RawEvent::Moved(1, real));
+    assert_eq!(world.screen.lock().unwrap().overlay, Some(real));
 }
