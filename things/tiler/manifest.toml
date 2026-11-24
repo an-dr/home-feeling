@@ -1,0 +1,2 @@
+description = "Tiles windows on each monitor in a dwindle layout"
+requests = ["windows", "hotkeys", "overlays"]

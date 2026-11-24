@@ -6,7 +6,7 @@ Seeing, changing, reloading, and trusting Things. A Thing is a Lua script with i
 
 - **Actor**: Desktop user.
 - **Goal**: Know which Things are installed and turn each on or off.
-- **Flow**: Open the Things window from the tray icon. It lists every Thing with its state (running, stopped, faulted, waiting for permission), and each Thing has an enable switch.
+- **Flow**: Open the Things window, from the tray icon on Windows. It lists every Thing with its state (running, stopped, faulted, waiting for permission), and each Thing has an enable switch.
 - **Success**: A disabled Thing stops at once and stays stopped after a restart. An enabled one starts.
 
 ## UC-THINGS-02: Change a Thing and reload it
@@ -34,5 +34,5 @@ Seeing, changing, reloading, and trusting Things. A Thing is a Lua script with i
 
 - **Actor**: Desktop user.
 - **Goal**: Change a Thing's options.
-- **Flow**: Edit its `config.lua`, or use the settings panel the Thing contributes to the Things window, if it has one.
+- **Flow**: Edit its `config.lua`, then press Reload all.
 - **Success**: After reload the new values apply. An invalid value is reported, and the Thing keeps its previous settings.
