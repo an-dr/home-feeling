@@ -11,7 +11,7 @@ local windows = {}   -- id -> window info, with the real frame in .rect
 local floating = {}  -- id -> true for windows left at their own size
 local maximized = {} -- id -> true while the user has it maximized
 local minimum = {}   -- id -> { w, h } a window refused to go below
-local pending = {}   -- id -> true until the first frame after our move
+local pending = {}   -- id -> true while a move we asked for has not settled
 local trees = {}     -- monitor id -> root node
 local monitors = {}  -- monitor id -> monitor
 local placed = {}    -- id -> rect the last layout gave it
@@ -36,18 +36,44 @@ local MIN_W = setting("min_width", 400)
 local MIN_H = setting("min_height", 300)
 local BORDER = setting("border", { enabled = true, color = "#2f6f5e", width = 3 })
 
+-- Sizes --------------------------------------------------------------------
+
+-- The smallest tile a window takes: the configured minimum, raised to what
+-- the window itself refused to go below.
+local function need(id)
+  local own = minimum[id] or {}
+  return { w = math.max(MIN_W, own.w or 0), h = math.max(MIN_H, own.h or 0) }
+end
+
+-- The smallest area a subtree takes: its children side by side or stacked.
+local function need_of(node)
+  if node.window then return need(node.window) end
+  local a, b = need_of(node.a), need_of(node.b)
+  if node.split == "h" then
+    return { w = a.w + GAP + b.w, h = math.max(a.h, b.h) }
+  end
+  return { w = math.max(a.w, b.w), h = a.h + GAP + b.h }
+end
+
 -- Layout -------------------------------------------------------------------
 
-local function split_rect(rect, dir, ratio)
+-- Divides `rect` at `ratio`, moved as little as needed for each side to get
+-- at least `need_a` and `need_b` along the split, when both can.
+local function split_rect(rect, dir, ratio, need_a, need_b)
   ratio = ratio or 0.5
-  if dir == "h" then
-    local wa = math.floor((rect.w - GAP) * ratio)
-    return { x = rect.x, y = rect.y, w = wa, h = rect.h },
-           { x = rect.x + wa + GAP, y = rect.y, w = rect.w - wa - GAP, h = rect.h }
+  local span = (dir == "h" and rect.w or rect.h) - GAP
+  local first = math.floor(span * ratio)
+  if need_a and need_b then
+    local lo = dir == "h" and need_a.w or need_a.h
+    local hi = span - (dir == "h" and need_b.w or need_b.h)
+    if lo <= hi then first = math.min(math.max(first, lo), hi) end
   end
-  local ha = math.floor((rect.h - GAP) * ratio)
-  return { x = rect.x, y = rect.y, w = rect.w, h = ha },
-         { x = rect.x, y = rect.y + ha + GAP, w = rect.w, h = rect.h - ha - GAP }
+  if dir == "h" then
+    return { x = rect.x, y = rect.y, w = first, h = rect.h },
+           { x = rect.x + first + GAP, y = rect.y, w = rect.w - first - GAP, h = rect.h }
+  end
+  return { x = rect.x, y = rect.y, w = rect.w, h = first },
+         { x = rect.x, y = rect.y + first + GAP, w = rect.w, h = rect.h - first - GAP }
 end
 
 -- Fills `out` with each window's rect and remembers each node's own rect,
@@ -58,7 +84,7 @@ local function layout(node, rect, out)
     out[node.window] = rect
     return
   end
-  local a, b = split_rect(rect, node.split, node.ratio)
+  local a, b = split_rect(rect, node.split, node.ratio, need_of(node.a), need_of(node.b))
   layout(node.a, a, out)
   layout(node.b, b, out)
 end
@@ -150,8 +176,8 @@ end
 -- Whether `id` fits `rect`: the configured minimum, and the size the window
 -- itself refused to go below, if it ever did.
 local function fits(id, rect)
-  local own = minimum[id] or { w = 0, h = 0 }
-  return rect.w >= math.max(MIN_W, own.w) and rect.h >= math.max(MIN_H, own.h)
+  local size = need(id)
+  return rect.w >= size.w and rect.h >= size.h
 end
 
 -- Adds a window to its monitor's tree, or floats it when its tile would be
@@ -174,18 +200,23 @@ local function insert(id)
   local rects = {}
   layout(tree, area(monitors[monitor_id]), rects)
   local rect = rects[target.window]
-  local dir = rect.w >= rect.h and "h" or "v"
-  local kept, new = split_rect(rect, dir)
-  if not fits(id, new) or not fits(target.window, kept) then
-    floating[id] = true
-    bones.debug("floating " .. window.title .. ": its tile would be " .. new.w .. "x" .. new.h)
-    return false
+  -- The longer side first; the other when the windows only fit that way.
+  local dirs = rect.w >= rect.h and { "h", "v" } or { "v", "h" }
+  for _, dir in ipairs(dirs) do
+    local kept, new = split_rect(rect, dir, 0.5, need(target.window), need(id))
+    if fits(id, new) and fits(target.window, kept) then
+      local span = (dir == "h" and rect.w or rect.h) - GAP
+      target.split = dir
+      target.ratio = (dir == "h" and kept.w or kept.h) / span
+      target.a, target.b = { window = target.window }, { window = id }
+      target.window = nil
+      floating[id] = nil
+      return true
+    end
   end
-  target.split, target.ratio = dir, 0.5
-  target.a, target.b = { window = target.window }, { window = id }
-  target.window = nil
-  floating[id] = nil
-  return true
+  floating[id] = true
+  bones.debug("floating " .. window.title .. ": no tile fits it")
+  return false
 end
 
 local function remove(id)
@@ -203,6 +234,21 @@ local function remove(id)
     end
   end
   return false
+end
+
+-- Puts a window that just left the layout in the middle of its monitor, at
+-- its own size, so it does not sit on top of one tile.
+local function centre_float(id)
+  local window = windows[id]
+  local monitor = window and monitors[key(window.monitor)] or (next(monitors) and monitors[next(monitors)])
+  if not window or not monitor or maximized[id] then return end
+  local work, r = monitor.work, window.rect
+  local w, h = math.min(r.w, work.w), math.min(r.h, work.h)
+  bones.publish("desktop/windows/move", {
+    id = window.id,
+    rect = { x = work.x + (work.w - w) // 2, y = work.y + (work.h - h) // 2, w = w, h = h },
+    raise = true,
+  })
 end
 
 local function tiled(id)
@@ -223,11 +269,27 @@ end
 -- A tiled window came out larger than its tile: the app has a minimum size.
 -- Remember it, float the window, and give its space to the others.
 local function refused(id, rect)
-  minimum[id] = { w = rect.w, h = rect.h }
+  local tile = placed[id]
+  local own = minimum[id] or {}
+  minimum[id] = {
+    w = rect.w > tile.w + SLACK and rect.w or own.w,
+    h = rect.h > tile.h + SLACK and rect.h or own.h,
+  }
+  apply()
+  -- Room only counts when no other window was squeezed below its own need.
+  local room = true
+  for other, rect in pairs(placed) do
+    if not fits(other, rect) then room = false end
+  end
+  if room then
+    bones.debug(windows[id].title .. " needs at least " .. rect.w .. "x" .. rect.h .. "; made room")
+    return
+  end
   remove(id)
   floating[id] = true
   bones.info("floating " .. windows[id].title .. ": it needs at least " .. rect.w .. "x" .. rect.h)
   apply()
+  centre_float(id)
 end
 
 -- The user dragged an edge of a tiled window: move the split that edge
@@ -331,6 +393,7 @@ function actions.toggle_float()
   if tiled(focused) then
     remove(focused)
     floating[focused] = true
+    centre_float(focused)
   else
     -- Toggling back in is a request to try again, whatever it refused before.
     minimum[focused] = nil
@@ -378,10 +441,20 @@ local function on_moved(event)
   local window = windows[id]
   if not window then return end
   window.rect = event.rect
-  if pending[id] then
+  if id == focused then update_border() end
+end
+
+-- A move we asked for settled. It answers the current layout only when it
+-- was a move to the tile the window has now; older moves are history.
+local function on_settled(event)
+  local id = key(event.id)
+  local window = windows[id]
+  if not window then return end
+  window.rect = event.rect
+  local tile = placed[id]
+  if tile and same(event.requested, tile) then
     pending[id] = nil
-    local tile = placed[id]
-    if tile and tiled(id) and not maximized[id]
+    if tiled(id) and not maximized[id]
       and (event.rect.w > tile.w + SLACK or event.rect.h > tile.h + SLACK) then
       refused(id, event.rect)
     end
@@ -398,6 +471,7 @@ local handlers = {
     update_border()
   end,
   ["desktop/windows/moved"] = on_moved,
+  ["desktop/windows/settled"] = on_settled,
   ["desktop/windows/dragged"] = function(event)
     local id = key(event.id)
     if windows[id] then windows[id].rect = event.rect end

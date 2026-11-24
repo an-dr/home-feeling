@@ -53,7 +53,7 @@ impl Backend for Fake {
     fn poll(&mut self) -> Vec<RawEvent> {
         std::mem::take(&mut self.0.lock().unwrap().pending)
     }
-    fn move_window(&mut self, id: Id, rect: Rect) -> Result<(), String> {
+    fn move_window(&mut self, id: Id, rect: Rect, _: bool) -> Result<(), String> {
         let mut screen = self.0.lock().unwrap();
         screen.moves.push((id, rect));
         // Report the frame the window really took, as Windows does.
@@ -64,6 +64,7 @@ impl Backend for Fake {
             ..rect
         };
         screen.pending.push(RawEvent::Moved(id, actual));
+        screen.pending.push(RawEvent::Settled(id, actual, rect));
         Ok(())
     }
     fn focus(&mut self, id: Id) -> Result<(), String> {
@@ -181,6 +182,20 @@ impl World {
     fn event(&mut self, event: RawEvent) {
         self.screen.lock().unwrap().pending.push(event);
         self.frame();
+        // A Lua error quarantines the tiler, after which nothing moves and an
+        // assertion about moves can pass by accident.
+        let tiler = self
+            .control
+            .records()
+            .into_iter()
+            .find(|r| r.name == "tiler")
+            .unwrap();
+        assert_eq!(
+            tiler.state,
+            GuestState::Running,
+            "the tiler faulted: {:?}",
+            tiler.last_error
+        );
     }
 
     fn press(&mut self, keys: &str) {
@@ -373,6 +388,75 @@ fn without_window_management_the_tiler_says_so_and_does_nothing() {
 }
 
 #[test]
+fn a_window_that_refuses_its_tile_gets_a_wider_one_when_there_is_room() {
+    let mut world = world(None, &[1]);
+    world.screen.lock().unwrap().minimums.insert(2, (550, 0));
+    world.event(RawEvent::Opened(window(2)));
+    // 2 refused 488 and needs 550: the split moves so it fits beside 1.
+    let moves = world.last_moves();
+    assert_eq!(
+        moves[&2],
+        Rect {
+            x: 442,
+            y: 8,
+            w: 550,
+            h: 784
+        }
+    );
+    assert_eq!(
+        moves[&1],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 426,
+            h: 784
+        }
+    );
+}
+
+#[test]
+fn the_window_that_needs_more_room_floats_rather_than_squeeze_another() {
+    let mut world = world(None, &[1]);
+    let mut screen = world.screen.lock().unwrap();
+    screen.minimums.insert(1, (600, 0));
+    screen.minimums.insert(2, (450, 0));
+    drop(screen);
+    world.event(RawEvent::Moved(
+        1,
+        Rect {
+            x: 8,
+            y: 8,
+            w: 984,
+            h: 784,
+        },
+    ));
+    world.event(RawEvent::Opened(window(2)));
+    // 1 refuses 488 and needs 600, which would leave 2 only 376, under the
+    // 400 minimum: 1 floats, centred, and 2 takes the whole area.
+    let log = world.tiler_log();
+    assert!(log.iter().any(|l| l.contains("floating w1")), "{log:?}");
+    let moves = world.last_moves();
+    assert_eq!(
+        moves[&2],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 984,
+            h: 784
+        }
+    );
+    assert_eq!(
+        moves[&1],
+        Rect {
+            x: 200,
+            y: 8,
+            w: 600,
+            h: 784
+        }
+    );
+}
+
+#[test]
 fn a_window_that_refuses_its_tile_floats_and_the_rest_retile() {
     let mut world = world(None, &[1]);
     world.screen.lock().unwrap().minimums.insert(2, (700, 0));
@@ -401,13 +485,13 @@ fn a_window_that_refuses_its_tile_floats_and_the_rest_retile() {
 fn dragging_the_edge_between_two_tiles_moves_the_split() {
     let mut world = world(None, &[1, 2]);
     world.screen.lock().unwrap().moves.clear();
-    // The user drags 1's right edge from 496 to 696.
+    // The user drags 1's right edge from 496 to 568.
     world.event(RawEvent::Dragged(
         1,
         Rect {
             x: 8,
             y: 8,
-            w: 688,
+            w: 560,
             h: 784,
         },
     ));
@@ -417,9 +501,43 @@ fn dragging_the_edge_between_two_tiles_moves_the_split() {
     assert_eq!(
         moves[&2],
         Rect {
-            x: 704,
+            x: 576,
             y: 8,
-            w: 288,
+            w: 416,
+            h: 784
+        }
+    );
+}
+
+#[test]
+fn a_drag_never_squeezes_the_neighbour_below_its_minimum() {
+    let mut world = world(None, &[1, 2]);
+    world.event(RawEvent::Dragged(
+        1,
+        Rect {
+            x: 8,
+            y: 8,
+            w: 900,
+            h: 784,
+        },
+    ));
+    // 2 keeps the 400 minimum; 1 gets the rest.
+    let moves = world.last_moves();
+    assert_eq!(
+        moves[&2],
+        Rect {
+            x: 592,
+            y: 8,
+            w: 400,
+            h: 784
+        }
+    );
+    assert_eq!(
+        moves[&1],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 576,
             h: 784
         }
     );
