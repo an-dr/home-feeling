@@ -3,7 +3,9 @@
 //! The module publishes:
 //! - `desktop/windows/opened` [`WindowInfo`]
 //! - `desktop/windows/closed`, `focused`, `minimized` `{ "id" }`
-//! - `desktop/windows/moved` `{ "id", "rect" }`
+//! - `desktop/windows/moved` `{ "id", "rect" }`, after any change of position or size
+//! - `desktop/windows/dragged` `{ "id", "rect" }`, when the user ends a drag or resize
+//! - `desktop/windows/maximized` `{ "id", "maximized" }`, on maximize and restore
 //! - `desktop/monitors/changed` `{ "monitors": [Monitor] }`
 //! - `desktop/hotkeys/pressed` `{ "owner", "id" }`
 //!
@@ -35,6 +37,8 @@ pub struct WindowInfo {
     pub rect: Rect,
     pub monitor: Id,
     pub minimized: bool,
+    #[serde(default)]
+    pub maximized: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

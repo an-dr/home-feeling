@@ -63,7 +63,13 @@ pub struct Windows {
     known: HashMap<Id, WindowInfo>,
     focused: Option<Id>,
     monitors: Vec<Monitor>,
+    /// Windows moved on request, and when to report the frame they took.
+    checks: Vec<(Id, std::time::Instant)>,
 }
+
+/// How long a window gets to settle after a move before its frame is
+/// reported, whether or not it changed.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(150);
 
 impl Windows {
     pub fn start() -> Self {
@@ -91,6 +97,7 @@ impl Windows {
             known: HashMap::new(),
             focused: None,
             monitors: monitors(),
+            checks: Vec::new(),
         };
         for hwnd in top_level_windows() {
             if let Some(info) = describe(hwnd) {
@@ -143,6 +150,11 @@ impl Windows {
             }
             EVENT_OBJECT_LOCATIONCHANGE | EVENT_SYSTEM_MOVESIZEEND => {
                 if let Some(info) = self.known.get_mut(&id) {
+                    let maximized = unsafe { IsZoomed(hwnd as HWND) } != 0;
+                    if maximized != info.maximized {
+                        info.maximized = maximized;
+                        out.push(RawEvent::Maximized(id, maximized));
+                    }
                     if let Some(rect) = frame(hwnd as HWND) {
                         if rect != info.rect {
                             info.rect = rect;
@@ -150,6 +162,11 @@ impl Windows {
                                 MonitorFromWindow(hwnd as HWND, MONITOR_DEFAULTTONEAREST)
                             } as Id;
                             out.push(RawEvent::Moved(id, rect));
+                        }
+                        // The end of a drag or resize by the user, as opposed
+                        // to a move this module or the app made.
+                        if event == EVENT_SYSTEM_MOVESIZEEND {
+                            out.push(RawEvent::Dragged(id, rect));
                         }
                     }
                 }
@@ -191,6 +208,18 @@ impl Backend for Windows {
                     self.monitors = monitors();
                     out.push(RawEvent::MonitorsChanged(self.monitors.clone()));
                 }
+            }
+        }
+        // A window that refuses a move keeps its frame, so no change event
+        // comes; report the frame anyway, so the requester learns the outcome.
+        let now = std::time::Instant::now();
+        let (due, waiting): (Vec<_>, Vec<_>) =
+            self.checks.drain(..).partition(|(_, at)| now >= *at);
+        self.checks = waiting;
+        for (id, _) in due {
+            if let (Some(info), Some(rect)) = (self.known.get_mut(&id), frame(id as HWND)) {
+                info.rect = rect;
+                out.push(RawEvent::Moved(id, rect));
             }
         }
         out
@@ -239,6 +268,8 @@ impl Backend for Windows {
                 ));
             }
         }
+        self.checks.retain(|(other, _)| *other != id);
+        self.checks.push((id, std::time::Instant::now() + SETTLE));
         Ok(())
     }
 
@@ -370,6 +401,7 @@ fn describe(hwnd: HWND) -> Option<WindowInfo> {
             rect: frame(hwnd)?,
             monitor: MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) as Id,
             minimized: IsIconic(hwnd) != 0,
+            maximized: IsZoomed(hwnd) != 0,
         })
     }
 }

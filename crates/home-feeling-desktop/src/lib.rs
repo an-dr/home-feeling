@@ -38,6 +38,9 @@ pub enum RawEvent {
     Closed(Id),
     Focused(Id),
     Moved(Id, Rect),
+    /// The user ended a drag or resize of the window.
+    Dragged(Id, Rect),
+    Maximized(Id, bool),
     Minimized(Id),
     MonitorsChanged(Vec<Monitor>),
     Hotkey(u32),
@@ -282,6 +285,11 @@ impl Desktop {
             rect: Rect,
         }
         #[derive(Serialize)]
+        struct MaximizedEvent {
+            id: Id,
+            maximized: bool,
+        }
+        #[derive(Serialize)]
         struct MonitorsEvent {
             monitors: Vec<Monitor>,
         }
@@ -295,6 +303,13 @@ impl Desktop {
             RawEvent::Closed(id) => self.publish("desktop/windows/closed", &IdEvent { id }),
             RawEvent::Focused(id) => self.publish("desktop/windows/focused", &IdEvent { id }),
             RawEvent::Minimized(id) => self.publish("desktop/windows/minimized", &IdEvent { id }),
+            RawEvent::Dragged(id, rect) => {
+                self.publish("desktop/windows/dragged", &MovedEvent { id, rect })
+            }
+            RawEvent::Maximized(id, maximized) => self.publish(
+                "desktop/windows/maximized",
+                &MaximizedEvent { id, maximized },
+            ),
             RawEvent::Moved(id, rect) => {
                 self.publish("desktop/windows/moved", &MovedEvent { id, rect })
             }
