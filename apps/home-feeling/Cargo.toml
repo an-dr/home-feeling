@@ -14,6 +14,7 @@ bones-kernel = { path = "../../vendor/bones/crates/bones-kernel", default-featur
 sdl3 = { version = "0.18.4", features = ["build-from-source-static", "unsafe_textures"] }
 bones-consent = { path = "../../crates/bones-consent" }
 bones-module-lua = { path = "../../crates/bones-module-lua" }
+home-feeling-desktop = { path = "../../crates/home-feeling-desktop" }
 dirs = "6"
 open = "5"
 serde = { version = "1", features = ["derive"] }
