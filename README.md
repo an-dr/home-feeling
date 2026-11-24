@@ -53,3 +53,7 @@ Run the tests with `cargo test --workspace`. To package and publish, see [docs/r
 ## Documentation
 
 Start at [docs/index.md](docs/index.md) for use cases, architecture, and decisions.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
