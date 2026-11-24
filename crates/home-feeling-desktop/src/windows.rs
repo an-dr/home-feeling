@@ -67,6 +67,14 @@ pub struct Windows {
 
 impl Windows {
     pub fn start() -> Self {
+        // Window frames come back in real pixels, so monitors must too. The
+        // engine turns DPI awareness on only when it opens its window, after
+        // this runs; on a scaled display monitors read earlier are scaled.
+        unsafe {
+            windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+                windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            );
+        }
         let (note_tx, notes) = channel();
         let _ = NOTES.set(Mutex::new(note_tx));
         let (commands, command_rx) = channel();
@@ -153,6 +161,8 @@ impl Windows {
 
 impl Backend for Windows {
     fn snapshot(&mut self) -> Snapshot {
+        // Read again: scale or layout may have changed since start.
+        self.monitors = monitors();
         Snapshot {
             capabilities: Capabilities {
                 windows: true,
