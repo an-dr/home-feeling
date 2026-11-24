@@ -1,0 +1,13 @@
+[package]
+name = "home-feeling"
+version.workspace = true
+edition = "2021"
+
+[[bin]]
+name = "home-feeling-app"
+path = "src/main.rs"
+
+[dependencies]
+bones-kernel = { path = "../../vendor/bones/crates/bones-kernel", default-features = false, features = ["presentation"] }
+# bones links SDL3; building it from source statically keeps the app one file.
+sdl3 = { version = "0.18.4", features = ["build-from-source-static", "unsafe_textures"] }

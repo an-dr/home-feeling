@@ -1,0 +1,7 @@
+[package]
+name = "home-feeling-launcher"
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+bones-launcher = { path = "../../vendor/bones/crates/bones-launcher" }
