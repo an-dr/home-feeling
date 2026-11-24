@@ -21,8 +21,8 @@ use serde::Serialize;
 
 pub use keys::{Hotkey, Key, Modifiers};
 use protocol::{
-    Capabilities, HotkeyRequest, Id, IdOnly, Monitor, MoveRequest, Overlay, OverlayRequest, Rect,
-    Snapshot, WindowInfo,
+    Capabilities, HotkeyRequest, Id, IdOnly, Monitor, MoveRequest, Overlay, OverlayRequest, Point,
+    Rect, Snapshot, WindowInfo,
 };
 
 /// The module's endpoint.
@@ -40,8 +40,12 @@ pub enum RawEvent {
     Moved(Id, Rect),
     /// The frame a window settled at after the move to `requested`.
     Settled(Id, Rect, Rect),
+    /// The user started dragging or resizing the window.
+    DragStarted(Id, Point),
+    /// The window's frame and the cursor during a drag or resize.
+    Dragging(Id, Rect, Point),
     /// The user ended a drag or resize of the window.
-    Dragged(Id, Rect),
+    Dragged(Id, Rect, Point),
     Maximized(Id, bool),
     Minimized(Id),
     MonitorsChanged(Vec<Monitor>),
@@ -56,6 +60,14 @@ pub trait Backend: Send {
     /// without focusing it.
     fn move_window(&mut self, id: Id, rect: Rect, raise: bool) -> Result<(), String>;
     fn focus(&mut self, id: Id) -> Result<(), String>;
+    /// Minimizes a window without moving focus.
+    fn minimize(&mut self, _id: Id) -> Result<(), String> {
+        Err("minimizing is not supported on this platform".into())
+    }
+    /// Restores a minimized window without focusing it.
+    fn restore(&mut self, _id: Id) -> Result<(), String> {
+        Err("restoring is not supported on this platform".into())
+    }
     fn register_hotkey(&mut self, key: u32, hotkey: Hotkey) -> Result<(), String>;
     fn unregister_hotkey(&mut self, key: u32);
     fn set_overlay(&mut self, key: u32, overlay: &Overlay);
@@ -232,6 +244,14 @@ impl Desktop {
                 let request: IdOnly = serde_json::from_slice(payload).map_err(parse_error)?;
                 state.backend.focus(request.id)?;
             }
+            "desktop/windows/minimize" => {
+                let request: IdOnly = serde_json::from_slice(payload).map_err(parse_error)?;
+                state.backend.minimize(request.id)?;
+            }
+            "desktop/windows/restore" => {
+                let request: IdOnly = serde_json::from_slice(payload).map_err(parse_error)?;
+                state.backend.restore(request.id)?;
+            }
             "desktop/hotkeys/register" => {
                 let request: HotkeyRequest =
                     serde_json::from_slice(payload).map_err(parse_error)?;
@@ -291,6 +311,13 @@ impl Desktop {
             rect: Rect,
         }
         #[derive(Serialize)]
+        struct DragEvent {
+            id: Id,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            rect: Option<Rect>,
+            cursor: Point,
+        }
+        #[derive(Serialize)]
         struct SettledEvent {
             id: Id,
             rect: Rect,
@@ -323,9 +350,30 @@ impl Desktop {
                     requested,
                 },
             ),
-            RawEvent::Dragged(id, rect) => {
-                self.publish("desktop/windows/dragged", &MovedEvent { id, rect })
-            }
+            RawEvent::DragStarted(id, cursor) => self.publish(
+                "desktop/windows/drag-started",
+                &DragEvent {
+                    id,
+                    rect: None,
+                    cursor,
+                },
+            ),
+            RawEvent::Dragging(id, rect, cursor) => self.publish(
+                "desktop/windows/dragging",
+                &DragEvent {
+                    id,
+                    rect: Some(rect),
+                    cursor,
+                },
+            ),
+            RawEvent::Dragged(id, rect, cursor) => self.publish(
+                "desktop/windows/dragged",
+                &DragEvent {
+                    id,
+                    rect: Some(rect),
+                    cursor,
+                },
+            ),
             RawEvent::Maximized(id, maximized) => self.publish(
                 "desktop/windows/maximized",
                 &MaximizedEvent { id, maximized },
@@ -371,6 +419,8 @@ impl Module for Desktop {
         for topic in [
             "desktop/windows/move",
             "desktop/windows/focus",
+            "desktop/windows/minimize",
+            "desktop/windows/restore",
             "desktop/hotkeys/*",
             "desktop/overlay/*",
             LifecycleEvent::TOPIC,
@@ -386,16 +436,30 @@ impl Module for Desktop {
         let events = state.backend.poll();
         // A window that moves many times in a frame is reported once.
         let mut moved: HashMap<Id, Rect> = HashMap::new();
+        let mut dragging: HashMap<Id, (Rect, Point)> = HashMap::new();
         for event in events {
             match event {
                 RawEvent::Moved(id, rect) => {
                     moved.insert(id, rect);
+                }
+                RawEvent::Dragging(id, rect, cursor) => {
+                    dragging.insert(id, (rect, cursor));
+                }
+                // The end of a drag comes after its last position.
+                RawEvent::Dragged(id, rect, cursor) => {
+                    if let Some((rect, cursor)) = dragging.remove(&id) {
+                        self.translate(&state, RawEvent::Dragging(id, rect, cursor));
+                    }
+                    self.translate(&state, RawEvent::Dragged(id, rect, cursor));
                 }
                 other => self.translate(&state, other),
             }
         }
         for (id, rect) in moved {
             self.translate(&state, RawEvent::Moved(id, rect));
+        }
+        for (id, (rect, cursor)) in dragging {
+            self.translate(&state, RawEvent::Dragging(id, rect, cursor));
         }
     }
 
