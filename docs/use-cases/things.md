@@ -13,7 +13,7 @@ Seeing, changing, reloading, and trusting Things. A Thing is a Lua script with i
 
 - **Actor**: Desktop user.
 - **Goal**: Have the app running without a window in the way.
-- **Flow**: Close the Things window: the app keeps running in the tray, and so do its Things. Double-click the tray icon, choose Show Things, or launch the app again to bring the window back; Quit in the tray menu ends it. In the Things window, Start with Windows adds the app to the user's startup list, and Start in the tray makes that start open no window.
+- **Flow**: Close the Things window: the app keeps running in the tray, and so do its Things. Double-click the tray icon, choose Show Things, or launch the app again to bring the window back; Quit in the tray menu ends it. On the home-feeling settings page of the Things window, Start with Windows adds the app to the user's startup list, and Start in the tray makes that start open no window.
 - **Success**: Closing the window never stops the Things. A second launch never opens a second copy; it shows the running one, except when it is the startup entry starting an app that already runs. Quit stops everything.
 
 ## UC-THINGS-02: Change a Thing and reload it

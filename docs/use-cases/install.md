@@ -20,7 +20,7 @@ The same approach as [crossWall](https://github.com/an-dr/cross-wall).
 
 - **Actor**: Desktop user.
 - **Goal**: Move to the newest release.
-- **Flow**: Check for updates, press Update, restart.
+- **Flow**: On the home-feeling settings page, Check for updates, press Update, restart.
 - **Success**: The new version runs. A failed download leaves the running version as it was. The previous version stays installed. Things I edited are never overwritten; a newer built-in version of a Thing I changed is offered, not imposed.
 
 ## UC-RELEASE-01: Publish a release

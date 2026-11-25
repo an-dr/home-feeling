@@ -69,12 +69,8 @@ fn run() -> bones_kernel::Result<()> {
     if app.autostart {
         let _ = autostart::set(true, app.start_minimized);
     }
+    // Written only while a Thing asks for it (the tiler's Diagnostics setting).
     let trace = home_feeling_desktop::Trace::new(data_dir.join("window-trace.jsonl"));
-    if app.trace_windows {
-        if let Err(err) = trace.set_enabled(true) {
-            eprintln!("{err}");
-        }
-    }
 
     let mut lua = LuaHost::new(logger.clone()).guests_dir(&things_dir);
     let mut startup = Vec::new();
@@ -110,7 +106,7 @@ fn run() -> bones_kernel::Result<()> {
                 logger.clone(),
                 home_feeling_desktop::native_backend(),
             )
-            .trace(trace.clone()),
+            .trace(trace),
         )
         .module(lua)
         .ui()
@@ -128,7 +124,6 @@ fn run() -> bones_kernel::Result<()> {
                     results: result_rx,
                 },
             )
-            .trace(trace)
             .start_in_tray(start_hidden),
         ));
     match primary {
