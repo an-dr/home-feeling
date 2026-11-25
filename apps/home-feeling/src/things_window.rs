@@ -25,6 +25,7 @@ use crate::color;
 use crate::installation::{self, UpdateState};
 use crate::settings::{AppSettings, Settings};
 use crate::tray::{Tray, TrayAction};
+use home_feeling_desktop::Trace;
 
 /// The module name, under which bones shows this window's trees.
 pub const NAME: &str = "home-feeling";
@@ -37,6 +38,8 @@ const INSTALL: u32 = 5;
 const UNREGISTER: u32 = 6;
 const AUTOSTART: u32 = 7;
 const START_MINIMIZED: u32 = 8;
+const TRACE_WINDOWS: u32 = 9;
+const OPEN_TRACE: u32 = 10;
 /// Each Thing's row owns ten ids from here: select, allow, refuse, enable.
 const ROWS: u32 = 1000;
 const SELECT: u32 = 0;
@@ -80,6 +83,8 @@ pub struct ThingsWindow {
     control: LuaControl,
     consent: Consent,
     settings: Settings,
+    /// The window trace the desktop module writes while it is on.
+    trace: Trace,
     things_dir: PathBuf,
     /// Each Thing's manifest as last read, or why it could not be read.
     manifests: HashMap<String, Result<Manifest, String>>,
@@ -132,6 +137,7 @@ impl ThingsWindow {
             control,
             consent,
             settings,
+            trace: Trace::off(),
             things_dir,
             manifests: HashMap::new(),
             denied,
@@ -153,6 +159,12 @@ impl ThingsWindow {
             window: None,
             exit: None,
         }
+    }
+
+    /// The window trace its checkbox switches.
+    pub fn trace(mut self, trace: Trace) -> Self {
+        self.trace = trace;
+        self
     }
 
     /// Hides the window as soon as it exists: the app was started for the tray.
@@ -920,6 +932,16 @@ impl ThingsWindow {
                 .node(START_MINIMIZED),
             );
         }
+        nodes.push(
+            Checkbox {
+                label: "Trace window positions (for diagnosing layout problems)".into(),
+                checked: self.trace.enabled(),
+            }
+            .node(TRACE_WINDOWS),
+        );
+        if self.trace.path().exists() {
+            nodes.push(Button::new("Open the trace folder").node(OPEN_TRACE));
+        }
         if !installation::running_installed() {
             nodes.push(Button::new("Install").node(INSTALL));
             return nodes;
@@ -976,6 +998,23 @@ impl ThingsWindow {
                 .map(|err| format!("Could not save settings: {err}")),
             Err(err) => Some(format!("Could not change the startup entry: {err}")),
         };
+    }
+
+    /// Starts or stops the window trace, and remembers the choice.
+    fn set_trace(&mut self, on: bool) {
+        if let Err(err) = self.trace.set_enabled(on) {
+            self.notice = Some(err);
+            return;
+        }
+        let app = AppSettings {
+            trace_windows: on,
+            ..self.settings.app()
+        };
+        self.notice = Some(match self.settings.set_app(app) {
+            Ok(()) if on => format!("Tracing windows to {}.", self.trace.path().display()),
+            Ok(()) => format!("Stopped. The trace is in {}.", self.trace.path().display()),
+            Err(err) => format!("Could not save settings: {err}"),
+        });
     }
 
     fn app_action(&mut self, id: u32) {
@@ -1083,6 +1122,22 @@ impl UiView for ThingsWindow {
                 }
             }
             CHECK_UPDATE | STAGE_UPDATE | INSTALL | UNREGISTER => self.app_action(id),
+            TRACE_WINDOWS => {
+                if let Event::Toggled { on, .. } = event {
+                    self.set_trace(on);
+                }
+            }
+            OPEN_TRACE => {
+                let dir = self
+                    .trace
+                    .path()
+                    .parent()
+                    .map(PathBuf::from)
+                    .unwrap_or_default();
+                if let Err(err) = open::that(&dir) {
+                    self.notice = Some(format!("Could not open the folder: {err}"));
+                }
+            }
             AUTOSTART | START_MINIMIZED => {
                 if let Event::Toggled { on, .. } = event {
                     self.set_startup(id, on);

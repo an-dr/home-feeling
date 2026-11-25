@@ -14,6 +14,9 @@ pub struct AppSettings {
     /// Start hidden in the tray, not with the window open.
     #[serde(default)]
     pub start_minimized: bool,
+    /// Record window events and moves to the window trace file.
+    #[serde(default)]
+    pub trace_windows: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -120,6 +123,7 @@ mod tests {
         let app = super::AppSettings {
             autostart: true,
             start_minimized: true,
+            trace_windows: true,
         };
         settings.set_app(app).unwrap();
         assert_eq!(Settings::open(path).app(), app);

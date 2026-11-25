@@ -6,6 +6,7 @@
 //! released when it stops, faults, or reloads without asking for them again.
 mod keys;
 pub mod protocol;
+mod trace;
 
 #[cfg(windows)]
 mod windows;
@@ -25,6 +26,7 @@ use protocol::{
     Capabilities, HotkeyRequest, Id, IdOnly, MenuRequest, Monitor, MoveRequest, Overlay,
     OverlayRequest, Point, Rect, Snapshot, WindowInfo,
 };
+pub use trace::Trace;
 
 /// The module's endpoint.
 const ENDPOINT: &str = "desktop";
@@ -218,6 +220,7 @@ pub struct Desktop {
     logger: Logger,
     shared: Shared,
     bus: Option<Bus>,
+    trace: Trace,
 }
 
 impl Desktop {
@@ -234,11 +237,19 @@ impl Desktop {
                 inbox: Vec::new(),
             }))),
             bus: None,
+            trace: Trace::off(),
         }
+    }
+
+    /// Records what the module sees and does to `trace` while it is enabled.
+    pub fn trace(mut self, trace: Trace) -> Self {
+        self.trace = trace;
+        self
     }
 
     fn publish(&self, topic: &str, value: &impl Serialize) {
         if let (Some(bus), Ok(payload)) = (&self.bus, serde_json::to_vec(value)) {
+            self.trace.message("out", topic, None, &payload);
             bus.publish(Envelope {
                 topic: topic.to_string(),
                 sender: ENDPOINT.to_string(),
@@ -496,6 +507,11 @@ impl Module for Desktop {
     fn before_tick(&mut self) {
         let shared = self.shared.clone();
         let mut state = shared.0.lock().unwrap();
+        if self.trace.snapshot_due() {
+            let snapshot = state.backend.snapshot();
+            self.trace
+                .record(serde_json::json!({ "kind": "snapshot", "snapshot": snapshot }));
+        }
         let events = state.backend.poll();
         // A window that moves many times in a frame is reported once.
         let mut moved: HashMap<Id, Rect> = HashMap::new();
@@ -531,7 +547,19 @@ impl Module for Desktop {
         let mut state = shared.0.lock().unwrap();
         let inbox = std::mem::take(&mut state.inbox);
         for envelope in inbox {
+            self.trace.message(
+                "in",
+                &envelope.topic,
+                Some(&envelope.sender),
+                &envelope.payload,
+            );
             if let Err(err) = self.apply(&mut state, &envelope) {
+                self.trace.record(serde_json::json!({
+                    "kind": "error",
+                    "topic": envelope.topic,
+                    "sender": envelope.sender,
+                    "error": err,
+                }));
                 self.logger.warn(
                     ENDPOINT,
                     &format!("{} from '{}': {err}", envelope.topic, envelope.sender),
