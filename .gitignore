@@ -1,0 +1,5 @@
+/target/
+/dist/
+/release/
+*.log
+tmp-agent-progress.html

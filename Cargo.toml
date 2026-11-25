@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["apps/home-feeling", "apps/home-feeling-launcher", "crates/bones-module-lua", "crates/bones-consent", "crates/home-feeling-desktop", "xtask"]
+exclude = ["vendor/bones", "vendor/bones/crates/bones-messages"]
+
+# The app and its launcher ship together and must report the same version;
+# UPGRADER_LAUNCHER_VERSION in .cargo/config.toml repeats it.
+[workspace.package]
+version = "0.1.0"
+
+# SDL3's build script derives its cmake build type from these. A Debug SDL on
+# Windows links the debug CRT while rustc links the release one.
+[profile.dev.package.sdl3-sys]
+opt-level = 2
+debug = false

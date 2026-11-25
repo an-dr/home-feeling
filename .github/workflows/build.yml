@@ -1,0 +1,98 @@
+name: build
+
+# Each platform builds natively. A v<version> tag also publishes the zips and
+# manifests as a GitHub release, where the installed app looks for updates; a
+# tag with a pre-release part, such as v0.1.0-rc.1, publishes a pre-release,
+# which installed apps skip. The notes are the version's CHANGELOG.md section.
+on:
+  push:
+    branches: [main, dev]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: windows-x64, os: windows-latest, arch: x64 }
+          - { platform: windows-arm64, os: windows-11-arm, arch: arm64 }
+          # The binary needs the glibc it was built against or newer, so Linux builds in a
+          # fixed old image rather than on whatever the runner ships. 22.04 (glibc 2.35) is
+          # the oldest with webkit2gtk-4.1, which the engine links.
+          - { platform: linux-x64, os: ubuntu-latest, arch: x64, container: 'ubuntu:22.04' }
+    steps:
+      # The bare image lacks what the steps below assume: git must precede checkout,
+      # or it downloads a tarball without the submodules, and a C toolchain must
+      # precede `cargo xtask linux-packages`, which compiles before it prints the list.
+      - name: Prepare container
+        if: runner.os == 'Linux'
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y sudo git curl ca-certificates build-essential
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential cmake ninja-build $(cd vendor/bones && cargo xtask linux-packages)
+      - name: Install Ninja
+        if: runner.os == 'Windows'
+        run: choco install ninja -y
+      # Ninja has no Visual Studio generator to find the compiler for it.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: ${{ matrix.arch }}
+      # Workspace crates only: --all would also check the vendored engine.
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: Package
+        run: cargo xtask package --platform ${{ matrix.platform }} ${{ startsWith(github.ref, 'refs/tags/v') && format('--tag {0}', github.ref_name) || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: home-feeling-${{ matrix.platform }}
+          path: release/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # A pre-release such as 0.1.0-rc.1 takes the notes of 0.1.0.
+          awk -v head="## [${version%%-*}]" 'index($0, head) == 1 {f=1; next} /^## \[/ || /^\[.*\]: / {f=0} f' CHANGELOG.md > notes.md
+          flags=()
+          [[ "$version" == *-* ]] && flags+=(--prerelease)
+          if [ -s notes.md ]; then flags+=(--notes-file notes.md); else flags+=(--generate-notes); fi
+          gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" "${flags[@]}"
