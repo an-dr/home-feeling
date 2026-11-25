@@ -21,6 +21,8 @@ pub enum Key {
     Enter,
     Tab,
     Function(u8),
+    /// Caps Lock, taken over: it fires the hotkey and never toggles capitals.
+    CapsLock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,35 @@ impl Hotkey {
     }
 }
 
+impl std::fmt::Display for Hotkey {
+    /// The text form `parse` reads back: modifiers in a fixed order, then the key.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let m = self.modifiers;
+        for (on, name) in [
+            (m.win, "win"),
+            (m.ctrl, "ctrl"),
+            (m.alt, "alt"),
+            (m.shift, "shift"),
+        ] {
+            if on {
+                write!(f, "{name}+")?;
+            }
+        }
+        match self.key {
+            Key::Letter(c) | Key::Digit(c) => write!(f, "{}", c.to_ascii_lowercase()),
+            Key::Left => write!(f, "left"),
+            Key::Right => write!(f, "right"),
+            Key::Up => write!(f, "up"),
+            Key::Down => write!(f, "down"),
+            Key::Space => write!(f, "space"),
+            Key::Enter => write!(f, "enter"),
+            Key::Tab => write!(f, "tab"),
+            Key::Function(n) => write!(f, "f{n}"),
+            Key::CapsLock => write!(f, "capslock"),
+        }
+    }
+}
+
 fn parse_key(name: &str) -> Option<Key> {
     let mut chars = name.chars();
     match (chars.next(), chars.next()) {
@@ -72,6 +103,7 @@ fn parse_key(name: &str) -> Option<Key> {
         "space" => Key::Space,
         "enter" | "return" => Key::Enter,
         "tab" => Key::Tab,
+        "capslock" | "caps" => Key::CapsLock,
         _ => {
             let number: u8 = name.strip_prefix('f')?.parse().ok()?;
             if !(1..=12).contains(&number) {
@@ -93,6 +125,23 @@ mod tests {
         assert_eq!(hotkey.key, Key::Left);
         assert_eq!(Hotkey::parse("win+f").unwrap().key, Key::Letter('F'));
         assert_eq!(Hotkey::parse("ctrl+f5").unwrap().key, Key::Function(5));
+    }
+
+    #[test]
+    fn text_form_reads_back_as_the_same_hotkey() {
+        for text in [
+            "alt+shift+left",
+            "ctrl+alt+f5",
+            "win+a",
+            "alt+shift+space",
+            "ctrl+1",
+            "capslock",
+            "shift+capslock",
+        ] {
+            let hotkey = Hotkey::parse(text).unwrap();
+            assert_eq!(hotkey.to_string(), text);
+            assert_eq!(Hotkey::parse(&hotkey.to_string()).unwrap(), hotkey);
+        }
     }
 
     #[test]

@@ -20,9 +20,10 @@ use bones_messages::{DecodeMessage, Message};
 use serde::Serialize;
 
 pub use keys::{Hotkey, Key, Modifiers};
+pub use protocol::MenuItem;
 use protocol::{
-    Capabilities, HotkeyRequest, Id, IdOnly, Monitor, MoveRequest, Overlay, OverlayRequest, Point,
-    Rect, Snapshot, WindowInfo,
+    Capabilities, HotkeyRequest, Id, IdOnly, MenuRequest, Monitor, MoveRequest, Overlay,
+    OverlayRequest, Point, Rect, Snapshot, WindowInfo,
 };
 
 /// The module's endpoint.
@@ -50,6 +51,10 @@ pub enum RawEvent {
     Minimized(Id),
     MonitorsChanged(Vec<Monitor>),
     Hotkey(u32),
+    /// The overlay with this key, a badge, was clicked.
+    OverlayClicked(u32),
+    /// The popup menu with this key closed: the chosen item, or none.
+    Menu(u32, Option<u32>),
 }
 
 /// One platform's mechanisms. Methods report failures as text the module logs.
@@ -72,6 +77,9 @@ pub trait Backend: Send {
     fn unregister_hotkey(&mut self, key: u32);
     fn set_overlay(&mut self, key: u32, overlay: &Overlay);
     fn clear_overlay(&mut self, key: u32);
+    /// Opens a popup menu at a screen position; its outcome comes back as
+    /// [`RawEvent::Menu`] with the same key.
+    fn show_menu(&mut self, _key: u32, _items: &[MenuItem], _at: Point, _accent: &str) {}
 }
 
 /// The backend for platforms without desktop control in v1.
@@ -102,6 +110,33 @@ impl Backend for Unsupported {
     fn clear_overlay(&mut self, _: u32) {}
 }
 
+/// What the keyboard says while the user is asked to press a hotkey.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Capture {
+    /// Nothing usable is held yet.
+    Waiting,
+    /// The user pressed Escape.
+    Cancelled,
+    /// The user pressed Delete or Backspace: no hotkey.
+    Cleared,
+    /// The hotkey held, in the text form `Hotkey::parse` reads.
+    Combo(String),
+    /// This platform cannot read the keyboard this way.
+    Unsupported,
+}
+
+/// Reads the keys held right now; call it each frame while asking for a hotkey.
+pub fn capture_hotkey() -> Capture {
+    #[cfg(windows)]
+    {
+        windows::capture()
+    }
+    #[cfg(not(windows))]
+    {
+        Capture::Unsupported
+    }
+}
+
 /// The backend for the platform this build runs on.
 pub fn native_backend() -> Box<dyn Backend> {
     #[cfg(windows)]
@@ -121,6 +156,8 @@ struct State {
     backend: Box<dyn Backend>,
     hotkeys: HashMap<Owned, u32>,
     overlays: HashMap<Owned, u32>,
+    /// The popup menus opened, by key.
+    menus: HashMap<u32, Owned>,
     next_key: u32,
     /// For a guest that is reloading: what its replacement asked for so far.
     renewed: HashMap<String, HashSet<Owned>>,
@@ -191,6 +228,7 @@ impl Desktop {
                 backend,
                 hotkeys: HashMap::new(),
                 overlays: HashMap::new(),
+                menus: HashMap::new(),
                 next_key: 0,
                 renewed: HashMap::new(),
                 inbox: Vec::new(),
@@ -288,6 +326,15 @@ impl Desktop {
                 state.renew(&owned);
                 state.overlays.insert(owned, key);
             }
+            "desktop/overlay/menu" => {
+                let request: MenuRequest = serde_json::from_slice(payload).map_err(parse_error)?;
+                let key = state.key();
+                state.menus.insert(key, (owner, request.id));
+                let accent = request.accent.as_deref().unwrap_or("#00bcd4");
+                state
+                    .backend
+                    .show_menu(key, &request.items, request.at, accent);
+            }
             "desktop/overlay/clear" => {
                 let request: OverlayRequest =
                     serde_json::from_slice(payload).map_err(parse_error)?;
@@ -336,6 +383,12 @@ impl Desktop {
         struct HotkeyEvent<'a> {
             owner: &'a str,
             id: &'a str,
+        }
+        #[derive(Serialize)]
+        struct ChosenEvent<'a> {
+            owner: &'a str,
+            id: &'a str,
+            item: Option<u32>,
         }
         match event {
             RawEvent::Opened(info) => self.publish("desktop/windows/opened", &info),
@@ -387,6 +440,16 @@ impl Desktop {
             RawEvent::Hotkey(key) => {
                 if let Some(((owner, id), _)) = state.hotkeys.iter().find(|(_, k)| **k == key) {
                     self.publish("desktop/hotkeys/pressed", &HotkeyEvent { owner, id });
+                }
+            }
+            RawEvent::OverlayClicked(key) => {
+                if let Some(((owner, id), _)) = state.overlays.iter().find(|(_, k)| **k == key) {
+                    self.publish("desktop/overlay/clicked", &HotkeyEvent { owner, id });
+                }
+            }
+            RawEvent::Menu(key, item) => {
+                if let Some((owner, id)) = state.menus.get(&key) {
+                    self.publish("desktop/overlay/chosen", &ChosenEvent { owner, id, item });
                 }
             }
         }
