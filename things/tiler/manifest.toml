@@ -1,2 +1,197 @@
 description = "Tiles windows on each monitor in a dwindle layout"
 requests = ["windows", "hotkeys", "overlays"]
+
+# Settings: the Things window builds its controls from this list and hands the
+# values to init.lua as the global `config`; a dot in a key nests.
+
+[[settings]]
+key = "gap"
+type = "int"
+label = "Gap"
+description = "Pixels between windows, and between windows and the monitor edge."
+section = "Layout"
+default = 8
+min = 0
+max = 64
+
+[[settings]]
+key = "min_width"
+type = "int"
+label = "Smallest tile width"
+description = "A window that would get less, or refuses its tile, joins a stack: it shares a tile with the windows there, one shown at a time."
+section = "Layout"
+default = 400
+min = 100
+max = 1600
+
+[[settings]]
+key = "min_height"
+type = "int"
+label = "Smallest tile height"
+section = "Layout"
+default = 300
+min = 100
+max = 1200
+
+[[settings]]
+key = "drop_middle"
+type = "choice"
+label = "Dropping a window on the middle of a tile"
+description = "Stack puts it with the windows there, one shown at a time, even when there is room for its own tile. Swap exchanges the two tiles."
+section = "Stacking"
+default = "stack"
+options = ["stack", "swap"]
+
+[[settings]]
+key = "new_window"
+type = "choice"
+label = "A new window"
+description = "Split takes room from the focused tile when it fits. Stack always joins the focused tile."
+section = "Stacking"
+default = "split"
+options = ["split", "stack"]
+
+[[settings]]
+key = "border.enabled"
+type = "bool"
+label = "Frame around the active window"
+section = "Active window frame"
+default = true
+
+[[settings]]
+key = "border.color"
+type = "color"
+label = "Colour"
+section = "Active window frame"
+default = "#00bcd4"
+
+[[settings]]
+key = "border.width"
+type = "int"
+label = "Thickness"
+description = "In pixels."
+section = "Active window frame"
+default = 3
+min = 1
+max = 12
+
+[[settings]]
+key = "border.radius"
+type = "int"
+label = "Corner radius"
+description = "In pixels; 0 is square. Windows 11 rounds its windows by about 8."
+section = "Active window frame"
+default = 0
+min = 0
+max = 32
+
+[[settings]]
+key = "border.float_color"
+type = "color"
+label = "Floating windows"
+section = "Other frames"
+default = "#ffb300"
+
+[[settings]]
+key = "border.tab_color"
+type = "color"
+label = "Tab strip of a stack"
+section = "Other frames"
+default = "#7f8c8d"
+
+[[settings]]
+key = "border.badge_color"
+type = "color"
+label = "Stack badge"
+description = "The circle with the window count in the corner of a stacked tile; click it to pick a window."
+section = "Other frames"
+default = "#00838f"
+
+[[settings]]
+key = "border.drop_fill"
+type = "number"
+label = "Drop preview fill"
+description = "How opaque the tile is filled while you drag a window onto it; 0 for no fill."
+section = "Other frames"
+default = 0.25
+min = 0.0
+max = 1.0
+
+[[settings]]
+key = "keys.focus_left"
+type = "keys"
+label = "Focus left"
+description = "Modifiers alt, ctrl, shift, win joined with + to one key; empty for none. Windows keeps most win+ combinations for itself."
+section = "Hotkeys"
+default = "alt+left"
+
+[[settings]]
+key = "keys.focus_right"
+type = "keys"
+label = "Focus right"
+section = "Hotkeys"
+default = "alt+right"
+
+[[settings]]
+key = "keys.focus_up"
+type = "keys"
+label = "Focus up"
+section = "Hotkeys"
+default = "alt+up"
+
+[[settings]]
+key = "keys.focus_down"
+type = "keys"
+label = "Focus down"
+section = "Hotkeys"
+default = "alt+down"
+
+[[settings]]
+key = "keys.swap_left"
+type = "keys"
+label = "Swap left"
+section = "Hotkeys"
+default = "alt+shift+left"
+
+[[settings]]
+key = "keys.swap_right"
+type = "keys"
+label = "Swap right"
+section = "Hotkeys"
+default = "alt+shift+right"
+
+[[settings]]
+key = "keys.swap_up"
+type = "keys"
+label = "Swap up"
+section = "Hotkeys"
+default = "alt+shift+up"
+
+[[settings]]
+key = "keys.swap_down"
+type = "keys"
+label = "Swap down"
+section = "Hotkeys"
+default = "alt+shift+down"
+
+[[settings]]
+key = "keys.toggle_float"
+type = "keys"
+label = "Float or tile the active window"
+section = "Hotkeys"
+default = "alt+shift+space"
+
+[[settings]]
+key = "keys.toggle_float_alt"
+type = "keys"
+label = "Float or tile the active window (second key)"
+description = "Caps Lock works here: it then fires this action and never turns capitals on."
+section = "Hotkeys"
+default = "capslock"
+
+[[settings]]
+key = "keys.stack_next"
+type = "keys"
+label = "Next window in the stack"
+section = "Hotkeys"
+default = "alt+shift+n"

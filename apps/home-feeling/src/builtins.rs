@@ -13,10 +13,6 @@ const BUILTINS: &[(&str, &[(&str, &str)])] = &[(
             "manifest.toml",
             include_str!("../../../things/tiler/manifest.toml"),
         ),
-        (
-            "config.lua",
-            include_str!("../../../things/tiler/config.lua"),
-        ),
         ("init.lua", include_str!("../../../things/tiler/init.lua")),
     ],
 )];

@@ -6,7 +6,7 @@ Extensible desktop tools for Windows and Linux, built on [bones](https://github.
 
 ## Features
 
-- **Things in Lua:** each Thing is a folder with `init.lua` and `config.lua`. Edit, save, press Reload all. A broken edit keeps the previous version running and shows the error with file and line.
+- **Things in Lua:** each Thing is a folder with `init.lua` and a `manifest.toml`. Edit, save, press Reload all. A broken edit keeps the previous version running and shows the error with file and line.
 - **Sandboxed:** a Thing reaches the system only through the bones message bus, under a time budget. A Thing that hangs or floods the bus is stopped and the rest keep running.
 - **You approve what a Thing may do:** a Thing asks for capabilities such as moving windows or global hotkeys, and runs only with the ones you allow.
 - **Tiler (Windows):** a dwindle layout on each monitor, with a configurable gap, a minimum tile size below which a new window floats, hotkeys to move focus, swap windows and toggle floating, and a border around the focused window.
@@ -32,7 +32,7 @@ Both verify the download's checksum, install into `~/.home-feeling`, and add the
 
 1. Start home-feeling. The Things window lists your Things; on Windows a tray icon brings it back.
 2. Select the tiler and press **Allow** to grant what it asks for.
-3. Change the gap, minimum size, border, or hotkeys in its `config.lua` (**Open Things folder**), then press **Reload all**.
+3. Change the gap, minimum size, active window frame (on or off, colour, thickness, corners), or hotkeys under the Thing's **Settings** in the Things window. Changes apply a moment after you make them.
 
 Default tiler hotkeys: `Alt+Arrow` moves focus, `Alt+Shift+Arrow` swaps with the neighbour, `Alt+Shift+Space` toggles floating.
 
