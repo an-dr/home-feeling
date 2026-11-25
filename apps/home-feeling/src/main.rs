@@ -69,6 +69,12 @@ fn run() -> bones_kernel::Result<()> {
     if app.autostart {
         let _ = autostart::set(true, app.start_minimized);
     }
+    let trace = home_feeling_desktop::Trace::new(data_dir.join("window-trace.jsonl"));
+    if app.trace_windows {
+        if let Err(err) = trace.set_enabled(true) {
+            eprintln!("{err}");
+        }
+    }
 
     let mut lua = LuaHost::new(logger.clone()).guests_dir(&things_dir);
     let mut startup = Vec::new();
@@ -99,10 +105,13 @@ fn run() -> bones_kernel::Result<()> {
         .upgrade(installation::config())
         .module(installation::UpdateBridge::new(update_rx, result_tx))
         // Before the Lua host, so Things can query it during their own init.
-        .module(home_feeling_desktop::Desktop::new(
-            logger.clone(),
-            home_feeling_desktop::native_backend(),
-        ))
+        .module(
+            home_feeling_desktop::Desktop::new(
+                logger.clone(),
+                home_feeling_desktop::native_backend(),
+            )
+            .trace(trace.clone()),
+        )
         .module(lua)
         .ui()
         .module(bones_kernel::ui::ViewModule::new(
@@ -119,6 +128,7 @@ fn run() -> bones_kernel::Result<()> {
                     results: result_rx,
                 },
             )
+            .trace(trace)
             .start_in_tray(start_hidden),
         ));
     match primary {

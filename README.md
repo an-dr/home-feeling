@@ -36,6 +36,8 @@ Both verify the download's checksum, install into `~/.home-feeling`, and add the
 
 Default tiler hotkeys: `Alt+Arrow` moves focus, `Alt+Shift+Arrow` swaps with the neighbour, `Alt+Shift+Space` toggles floating.
 
+If the tiler places a window wrongly, tick **Trace window positions** in the Things window, reproduce the problem, and untick it. The app writes every window event the system reported and every move a Thing requested, one JSON object per line, to `%LOCALAPPDATA%\home-feeling\window-trace.jsonl` (`~/.local/share/home-feeling/window-trace.jsonl` on Linux). Window titles are included, so check the file before you share it. Tracing is off by default and stays on across restarts until you untick it.
+
 Your Things live in `%APPDATA%\home-feeling\things` on Windows and `~/.config/home-feeling/things` on Linux. [things/README.md](things/README.md) describes a Thing's files.
 
 ## Build from source

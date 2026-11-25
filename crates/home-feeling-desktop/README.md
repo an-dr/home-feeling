@@ -6,4 +6,6 @@ Payloads are JSON, so Lua Things read and write them directly. The topics, the q
 
 Hotkeys and overlays belong to the guest that asked for them. They are released when it stops or faults, and on reload, those its replacement does not ask for again.
 
+An optional `Trace`, given with `Desktop::trace`, records every event the module publishes, every request it receives, failed requests, and a snapshot of all windows and monitors when it starts, as JSON lines. It is off until `Trace::set_enabled(true)`; [src/trace.rs](src/trace.rs) lists the record kinds.
+
 Run the tests with `cargo test -p home-feeling-desktop`. `cargo test -p home-feeling-desktop -- --ignored` also checks the Windows backend against the real desktop and briefly draws a red rectangle.

@@ -259,3 +259,65 @@ fn a_bad_payload_is_logged_not_fatal() {
     world.frame();
     assert_eq!(world.calls(), vec!["focus 1"]);
 }
+
+#[test]
+fn an_enabled_trace_records_the_snapshot_requests_and_events() {
+    let path = std::env::temp_dir().join(format!("hf-trace-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mut world = world();
+    let trace = crate::Trace::new(path.clone());
+    world.desktop.trace = trace.clone();
+
+    // Off by default: nothing is written.
+    world.send("t", "desktop/windows/focus", br#"{"id":1}"#);
+    world.frame();
+    assert!(!path.exists());
+
+    trace.set_enabled(true).unwrap();
+    world.send(
+        "tiler",
+        "desktop/windows/move",
+        br#"{"id":7,"rect":{"x":1,"y":2,"w":3,"h":4}}"#,
+    );
+    world.send("tiler", "desktop/windows/move", b"not json");
+    world.log.lock().unwrap().pending.push(RawEvent::Moved(
+        7,
+        Rect {
+            x: 1,
+            y: 2,
+            w: 3,
+            h: 4,
+        },
+    ));
+    world.frame();
+    trace.set_enabled(false).unwrap();
+    world.send("t", "desktop/windows/focus", br#"{"id":1}"#);
+    world.frame();
+
+    let kinds: Vec<(String, String)> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert!(record["t"].as_u64().is_some());
+            (
+                record["kind"].as_str().unwrap().to_string(),
+                record["topic"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    let _ = std::fs::remove_file(&path);
+    let expect = |kind: &str, topic: &str| (kind.to_string(), topic.to_string());
+    assert_eq!(
+        kinds,
+        vec![
+            expect("start", ""),
+            expect("snapshot", ""),
+            expect("out", "desktop/windows/moved"),
+            expect("in", "desktop/windows/move"),
+            expect("in", "desktop/windows/move"),
+            expect("error", "desktop/windows/move"),
+            expect("stop", ""),
+        ]
+    );
+}
