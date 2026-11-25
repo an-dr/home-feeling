@@ -41,6 +41,24 @@ impl HostApi {
     }
 }
 
+/// Writes the entries of the JSON object `over` into `table`, going into
+/// tables on both sides instead of replacing them.
+fn overlay(lua: &Lua, table: &mlua::Table, over: &serde_json::Value) -> mlua::Result<()> {
+    let Some(entries) = over.as_object() else {
+        return Ok(());
+    };
+    for (key, value) in entries {
+        if value.is_object() {
+            if let Value::Table(inner) = table.get::<Value>(key.as_str())? {
+                overlay(lua, &inner, value)?;
+                continue;
+            }
+        }
+        table.set(key.as_str(), lua.to_value(value)?)?;
+    }
+    Ok(())
+}
+
 /// When the current call must end; `None` while the guest is idle.
 type Deadline = Arc<Mutex<Option<Instant>>>;
 
@@ -56,6 +74,7 @@ impl Guest {
     pub fn load(
         dir: &Path,
         api: HostApi,
+        settings: Option<serde_json::Value>,
         init_budget: Duration,
         call_budget: Duration,
     ) -> Result<Self, String> {
@@ -81,6 +100,10 @@ impl Guest {
             Value::Nil => Value::Table(guest.lua.create_table().map_err(|e| e.to_string())?),
             value => value,
         };
+        if let (Value::Table(table), Some(settings)) = (&config, &settings) {
+            overlay(&guest.lua, table, settings)
+                .map_err(|err| format!("{name}/settings: {err}"))?;
+        }
         guest
             .lua
             .globals()

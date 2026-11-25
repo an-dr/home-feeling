@@ -71,6 +71,7 @@ pub struct LuaHost {
     guests_dir: Option<PathBuf>,
     startup: Option<Vec<String>>,
     permissions: HashMap<String, Permissions>,
+    configs: HashMap<String, serde_json::Value>,
     budget_limits: BudgetLimits,
     init_budget: Duration,
     call_budget: Duration,
@@ -88,6 +89,7 @@ impl LuaHost {
             guests_dir: None,
             startup: None,
             permissions: HashMap::new(),
+            configs: HashMap::new(),
             budget_limits: BudgetLimits::default(),
             init_budget: Duration::from_millis(500),
             call_budget: Duration::from_millis(50),
@@ -116,6 +118,13 @@ impl LuaHost {
     /// Denies the guest called `name` the topics and endpoints in `permissions`.
     pub fn permissions(mut self, name: impl Into<String>, permissions: Permissions) -> Self {
         self.permissions.insert(name.into(), permissions);
+        self
+    }
+
+    /// Settings for the guest called `name`: a JSON object overlaid on its
+    /// `config.lua` to make the global `config`.
+    pub fn config(mut self, name: impl Into<String>, config: serde_json::Value) -> Self {
+        self.configs.insert(name.into(), config);
         self
     }
 
@@ -190,7 +199,8 @@ impl LuaHost {
             logger: self.logger.clone(),
             control: self.control.clone(),
         };
-        match Guest::load(&dir, api, self.init_budget, self.call_budget) {
+        let config = self.configs.get(name).cloned();
+        match Guest::load(&dir, api, config, self.init_budget, self.call_budget) {
             Ok(guest) => {
                 cell.0.lock().unwrap().guest = Some(guest);
                 registry.insert(name.to_string(), Arc::new(cell.clone()));
@@ -302,6 +312,12 @@ impl LuaHost {
                 }
             }
             Command::Stop(name) => self.stop(&name),
+            Command::SetConfig(name, config) => {
+                self.configs.insert(name.clone(), config);
+                if self.running.contains_key(&name) {
+                    self.load(&name);
+                }
+            }
             Command::SetPermissions(name, permissions) => {
                 self.permissions.insert(name.clone(), permissions);
                 if self.running.contains_key(&name) {
