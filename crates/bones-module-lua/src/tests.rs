@@ -119,6 +119,34 @@ fn init_publishes_and_config_is_read() {
 }
 
 #[test]
+fn settings_overlay_config_and_keep_what_they_do_not_name() {
+    let mut world = world(&[], |host| {
+        host.config("a", serde_json::json!({ "border": { "width": 5 } }))
+    });
+    write(
+        world.dir(),
+        "a",
+        "config.lua",
+        "return { gap = 8, border = { width = 1, color = 'x' } }",
+    );
+    write(
+        world.dir(),
+        "a",
+        "init.lua",
+        "function init() bones.publish('test/c', config.gap .. config.border.width .. config.border.color) end",
+    );
+    world.control.reload_all();
+    world.control.start("a");
+    world.frame();
+    world.frame();
+    let heard = world.heard.lock().unwrap().clone();
+    assert!(
+        heard.contains(&("test/c".into(), "a".into(), b"85x".to_vec())),
+        "{heard:?}"
+    );
+}
+
+#[test]
 fn on_message_reply_answers_a_direct_send() {
     let world = world(
         &[(

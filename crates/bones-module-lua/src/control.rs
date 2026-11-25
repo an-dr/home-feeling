@@ -54,6 +54,9 @@ pub(crate) enum Command {
     Stop(String),
     /// Replace a guest's deny-list; a running guest is reloaded to apply it.
     SetPermissions(String, Permissions),
+    /// Replace a guest's settings, the `config` table's values; a running
+    /// guest is reloaded to apply them.
+    SetConfig(String, serde_json::Value),
 }
 
 #[derive(Default)]
@@ -84,6 +87,12 @@ impl LuaControl {
 
     pub fn set_permissions(&self, name: &str, permissions: Permissions) {
         self.push(Command::SetPermissions(name.to_string(), permissions));
+    }
+
+    /// Gives a guest new settings: a JSON object whose entries overlay its
+    /// `config.lua`. A running guest reloads with them.
+    pub fn set_config(&self, name: &str, config: serde_json::Value) {
+        self.push(Command::SetConfig(name.to_string(), config));
     }
 
     /// Every guest in the catalog, by name.

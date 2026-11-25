@@ -4,6 +4,10 @@
 //! some of them by id; the user's answer, stored per guest, decides which
 //! patterns the guest host denies. A guard the guarded code writes guards
 //! nothing (bones ADR-042), so the manifest only asks.
+mod setting;
+
+pub use setting::{nest, values, Kind, Setting};
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -32,12 +36,15 @@ impl Capability {
 }
 
 /// A guest's manifest: what it says about itself and what it asks for.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Manifest {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub requests: Vec<String>,
+    /// The options the user can change, as `[[settings]]` tables.
+    #[serde(default)]
+    pub settings: Vec<Setting>,
 }
 
 impl Manifest {
@@ -55,6 +62,9 @@ impl Manifest {
         let mut manifest: Self = toml::from_str(text).map_err(|err| err.to_string())?;
         manifest.requests.sort();
         manifest.requests.dedup();
+        for setting in &manifest.settings {
+            setting.check()?;
+        }
         Ok(manifest)
     }
 }

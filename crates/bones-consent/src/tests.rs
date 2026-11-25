@@ -114,3 +114,59 @@ fn prompt_clicks_map_to_answers() {
         None
     );
 }
+
+const WITH_SETTINGS: &str = r##"
+[[settings]]
+key = "border.width"
+type = "int"
+default = 3
+min = 1
+max = 12
+
+[[settings]]
+key = "border.color"
+type = "color"
+default = "#00bcd4"
+
+[[settings]]
+key = "mode"
+type = "choice"
+default = "a"
+options = ["a", "b"]
+"##;
+
+#[test]
+fn declared_settings_fall_back_to_defaults_when_the_stored_value_is_invalid() {
+    let manifest = Manifest::parse(WITH_SETTINGS).unwrap();
+    let stored = [
+        ("border.width".to_string(), serde_json::json!(99)),
+        ("border.color".to_string(), serde_json::json!("#FF0000")),
+        ("mode".to_string(), serde_json::json!("b")),
+    ]
+    .into();
+    let values = crate::values(&manifest.settings, &stored);
+    assert_eq!(values["border.width"], 3);
+    assert_eq!(values["border.color"], "#ff0000");
+    assert_eq!(values["mode"], "b");
+}
+
+#[test]
+fn dotted_keys_nest_into_the_config_object() {
+    let manifest = Manifest::parse(WITH_SETTINGS).unwrap();
+    let nested = crate::nest(&crate::values(&manifest.settings, &Default::default()));
+    assert_eq!(nested["border"]["width"], 3);
+    assert_eq!(nested["border"]["color"], "#00bcd4");
+    assert_eq!(nested["mode"], "a");
+}
+
+#[test]
+fn a_default_of_the_wrong_type_is_a_manifest_error() {
+    let err = Manifest::parse(
+        "[[settings]]
+key = \"x\"
+type = \"int\"
+default = \"no\"",
+    )
+    .unwrap_err();
+    assert!(err.contains("setting x"), "{err}");
+}
