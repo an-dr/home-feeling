@@ -1,10 +1,12 @@
 name: build
 
 # Each platform builds natively. A v<version> tag also publishes the zips and
-# manifests as a GitHub release, where the installed app looks for updates.
+# manifests as a GitHub release, where the installed app looks for updates; a
+# tag with a pre-release part, such as v0.1.0-rc.1, publishes a pre-release,
+# which installed apps skip. The notes are the version's CHANGELOG.md section.
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -75,6 +77,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
           path: release
@@ -82,4 +88,11 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --generate-notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # A pre-release such as 0.1.0-rc.1 takes the notes of 0.1.0.
+          awk -v head="## [${version%%-*}]" 'index($0, head) == 1 {f=1; next} /^## \[/ || /^\[.*\]: / {f=0} f' CHANGELOG.md > notes.md
+          flags=()
+          [[ "$version" == *-* ]] && flags+=(--prerelease)
+          if [ -s notes.md ]; then flags+=(--notes-file notes.md); else flags+=(--generate-notes); fi
+          gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" "${flags[@]}"
