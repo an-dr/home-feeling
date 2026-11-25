@@ -39,7 +39,9 @@ pub fn install_dir() -> Option<PathBuf> {
 }
 
 /// What a login should start: the installed launcher, whose path survives
-/// updates, or the running program when it is not installed.
+/// updates, or the running program when it is not installed. Only Windows
+/// sets up starting with the session.
+#[cfg(windows)]
 pub fn startup_exe() -> Option<PathBuf> {
     if running_installed() {
         install_dir().map(|dir| dir.join(identity().launcher_exe()))

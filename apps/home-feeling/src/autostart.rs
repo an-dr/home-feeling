@@ -4,10 +4,12 @@
 //!
 //! The value is the program to run, in quotes, and `--minimized` when the app
 //! should start in the tray.
+#[cfg(windows)]
 use std::path::PathBuf;
 
 /// The program a login should start: the launcher of the installed copy, which
 /// survives updates, and otherwise the running one.
+#[cfg(windows)]
 fn program() -> Option<PathBuf> {
     crate::installation::startup_exe()
 }

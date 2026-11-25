@@ -2,6 +2,8 @@
 //! one yet, so the app owns it for v1 (docs/architecture.md); Windows only,
 //! because on Linux the tray library needs a GTK loop the engine does not run.
 
+// Only the Windows tray makes these; elsewhere the menu never opens.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum TrayAction {
     Show,
     ReloadAll,
