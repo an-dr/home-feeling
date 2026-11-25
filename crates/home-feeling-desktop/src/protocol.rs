@@ -17,11 +17,14 @@
 //!   chosen entry's id, or null when the user dismissed it
 //!
 //! It listens on:
-//! - `desktop/windows/move` `{ "id", "rect", "raise"? }`; `raise` also brings it to the front
+//! - `desktop/windows/move` `{ "id", "rect", "raise"?, "delay"? }`; `raise` also brings it to the
+//!   front, `delay` waits that many milliseconds first
 //! - `desktop/windows/minimize` `{ "id" }`, `desktop/windows/restore` `{ "id" }`, neither
 //!   taking focus, `desktop/windows/focus` `{ "id" }`
+//! - `desktop/windows/trace` `{ "on" }`; the module records what it sees and does to its trace
+//!   file while any guest has it on
 //! - `desktop/hotkeys/register` `{ "id", "keys" }`, `desktop/hotkeys/unregister` `{ "id" }`
-//! - `desktop/overlay/set` `{ "id", "rect", "color", "width", "fill"?, "radius"?, "badge"?, "attach"? }`; `fill` is the opacity
+//! - `desktop/overlay/set` `{ "id", "rect", "color", "width", "fill"?, "radius"?, "badge"?, "attach"?, "fade_in"? }`; `fill` is the opacity
 //!   0 to 1 of the colour inside the border, `desktop/overlay/clear` `{ "id" }`,
 //!   `desktop/overlay/menu` `{ "id", "items": [{ "id", "label", "checked"?, "window"? }], "at": Point,
 //!   "accent"? }`, which
@@ -68,6 +71,10 @@ pub struct Monitor {
     pub rect: Rect,
     /// The part not covered by taskbars.
     pub work: Rect,
+    /// How round the system draws window corners here, in pixels: 8 scaled
+    /// to the monitor on Windows 11, 0 where corners are square.
+    #[serde(default)]
+    pub corner_radius: i32,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,11 +114,15 @@ pub struct Overlay {
     /// fields are ignored.
     #[serde(default)]
     pub badge: Option<String>,
-    /// A badge only: the window it belongs to. The badge sits just above that
-    /// window in the stacking order, so windows in front of it cover the badge
-    /// too, instead of floating over everything.
+    /// The window the overlay belongs to. The overlay sits just above that
+    /// window in the stacking order, so windows in front of it cover the
+    /// overlay too, instead of it floating over everything.
     #[serde(default)]
     pub attach: Option<Id>,
+    /// A border only: fades it in from transparent over this many
+    /// milliseconds. Later updates without it leave a running fade alone.
+    #[serde(default)]
+    pub fade_in: Option<u32>,
 }
 
 fn default_color() -> String {
@@ -167,6 +178,9 @@ pub(crate) struct MoveRequest {
     pub rect: Rect,
     #[serde(default)]
     pub raise: bool,
+    /// Milliseconds to wait before moving it.
+    #[serde(default)]
+    pub delay: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -181,4 +195,9 @@ pub(crate) struct OverlayRequest {
     pub id: String,
     #[serde(flatten)]
     pub overlay: Option<Overlay>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct TraceRequest {
+    pub on: bool,
 }

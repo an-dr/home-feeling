@@ -25,11 +25,22 @@ struct Screen {
     moves: Vec<(Id, Rect)>,
     hotkeys: Vec<(u32, Hotkey)>,
     overlay: Option<Rect>,
+    /// The window the focus frame was asked to sit above.
+    overlay_attach: Option<Id>,
+    /// The fade the focus frame was drawn with, each time.
+    overlay_fades: Vec<Option<u32>>,
+    /// The corner radius the focus frame was last drawn with.
+    overlay_radius: i32,
+    /// Every overlay drawn with a fill: its rect and fade.
+    filled: Vec<(Rect, Option<u32>)>,
     overlays: std::collections::HashMap<u32, (Rect, String)>,
     minimized: Vec<Id>,
     /// Windows whose next move ends smaller than asked, once, as a window
     /// that was minimized does.
     shrink_once: std::collections::HashSet<Id>,
+    /// Windows whose next move ends this much wider than asked, once, as a
+    /// window still sizing itself after it opened does.
+    grow_once: std::collections::HashMap<Id, i32>,
     /// The window each badge was asked to sit above.
     attached: Vec<Id>,
     /// Popup menus asked for: key, items, and where.
@@ -55,6 +66,7 @@ impl Backend for Fake {
                 id: 1,
                 rect: WORK,
                 work: WORK,
+                corner_radius: 0,
             }],
             focused: screen.windows.last().map(|w| w.id),
         }
@@ -79,6 +91,9 @@ impl Backend for Fake {
                 ..rect
             };
         }
+        if let Some(w) = screen.grow_once.remove(&id) {
+            actual.w = w;
+        }
         screen.pending.push(RawEvent::Moved(id, actual));
         screen.pending.push(RawEvent::Settled(id, actual, rect));
         Ok(())
@@ -96,6 +111,12 @@ impl Backend for Fake {
         let mut screen = self.0.lock().unwrap();
         if overlay.color == "#00bcd4" && overlay.width == 3 {
             screen.overlay = Some(overlay.rect);
+            screen.overlay_attach = overlay.attach;
+            screen.overlay_fades.push(overlay.fade_in);
+            screen.overlay_radius = overlay.radius;
+        }
+        if overlay.fill.is_some() {
+            screen.filled.push((overlay.rect, overlay.fade_in));
         }
         if let (Some(_), Some(id)) = (&overlay.badge, overlay.attach) {
             screen.attached.push(id);
@@ -198,7 +219,9 @@ fn world(backend: Option<Box<dyn Backend>>, initial: &[Id]) -> World {
     std::mem::forget(endpoint);
 
     let manifest = bones_consent::Manifest::read(&things_dir().join("tiler")).unwrap();
-    let defaults = bones_consent::values(&manifest.settings, &Default::default());
+    let mut defaults = bones_consent::values(&manifest.settings, &Default::default());
+    // Ask a too-large window again at once rather than a second later.
+    defaults.insert("reask_ms".into(), serde_json::json!(0));
     let mut lua = LuaHost::new(Logger::default())
         .guests_dir(things_dir())
         .config("tiler", bones_consent::nest(&defaults))
@@ -360,6 +383,8 @@ fn the_focus_border_follows_the_focused_tile() {
             h: 784
         })
     );
+    // Above its window, not above every window.
+    assert_eq!(world.screen.lock().unwrap().overlay_attach, Some(1));
 }
 
 #[test]
@@ -779,6 +804,11 @@ fn a_drag_previews_the_drop_and_clears_it_after() {
         .overlays
         .values()
         .any(|(r, _)| *r == preview));
+    // A new preview fades in quickly; the same one again does not restart it.
+    world.event(RawEvent::Dragging(2, Rect { x: 101, ..start }, at(21, 400)));
+    let filled = world.screen.lock().unwrap().filled.clone();
+    assert_eq!(filled.first(), Some(&(preview, Some(150))));
+    assert!(filled[1..].iter().all(|(_, fade)| fade.is_none()));
     world.event(RawEvent::Dragged(2, Rect { x: 100, ..start }, at(20, 400)));
     assert!(!world
         .screen
@@ -805,6 +835,21 @@ fn the_dragged_window_has_no_focus_frame_until_it_is_dropped() {
     assert_eq!(world.screen.lock().unwrap().overlay, None);
     world.event(RawEvent::Dragged(2, Rect { x: 100, ..start }, at(20, 400)));
     assert!(world.screen.lock().unwrap().overlay.is_some());
+    // It comes back fading in, and later updates leave the fade alone.
+    let fades = std::mem::take(&mut world.screen.lock().unwrap().overlay_fades);
+    assert_eq!(fades.first(), Some(&Some(1500)));
+    world.event(RawEvent::Focused(2));
+    let fades = world.screen.lock().unwrap().overlay_fades.clone();
+    assert!(!fades.is_empty() && fades.iter().all(Option::is_none));
+}
+
+#[test]
+fn dragging_any_window_hides_the_focus_frame() {
+    let mut world = world(None, &[1, 2]);
+    world.event(RawEvent::Focused(2));
+    assert!(world.screen.lock().unwrap().overlay.is_some());
+    world.event(RawEvent::DragStarted(1, at(200, 20)));
+    assert_eq!(world.screen.lock().unwrap().overlay, None);
 }
 
 #[test]
@@ -1027,6 +1072,7 @@ fn a_change_of_monitors_keeps_the_stacks() {
         id: 1,
         rect: WORK,
         work: WORK,
+        corner_radius: 0,
     }]));
     assert_eq!(badge_count(&world), 1);
     assert_eq!(world.screen.lock().unwrap().minimized, vec![1]);
@@ -1182,4 +1228,109 @@ fn a_window_that_ends_smaller_than_its_tile_is_moved_again() {
             h: 784
         }
     );
+}
+
+#[test]
+fn a_window_too_wide_once_gets_its_own_tile_after_all() {
+    // As Firefox in a real trace: just opened, it ignored the first move.
+    let mut world = world(None, &[1]);
+    world.screen.lock().unwrap().grow_once.insert(2, 700);
+    world.event(RawEvent::Opened(window(2)));
+    assert!(world.screen.lock().unwrap().minimized.is_empty());
+    assert_eq!(world.last_moves()[&2].w, 488);
+}
+
+#[test]
+fn a_window_minimized_and_restored_comes_back_to_its_place() {
+    let mut world = world(None, &[1, 2]);
+    world.event(RawEvent::Focused(2));
+    world.event(RawEvent::Opened(window(3)));
+    let before = world.last_moves();
+    world.event(RawEvent::Minimized(3));
+    // Focus elsewhere: a new window would split the focused tile instead.
+    world.event(RawEvent::Focused(1));
+    world.event(RawEvent::Opened(window(3)));
+    let after = world.last_moves();
+    for id in [1, 2, 3] {
+        assert_eq!(after[&id], before[&id], "window {id}");
+    }
+}
+
+#[test]
+fn a_stacked_window_minimized_and_restored_rejoins_its_stack() {
+    let mut world = world(None, &[1, 2]);
+    world.screen.lock().unwrap().minimums.insert(3, (0, 500));
+    world.event(RawEvent::Focused(2));
+    world.event(RawEvent::Opened(window(3)));
+    let shared = world.screen.lock().unwrap().minimized.clone();
+    assert_eq!(shared.len(), 1);
+    world.event(RawEvent::Minimized(3));
+    world.event(RawEvent::Focused(if shared[0] == 1 { 2 } else { 1 }));
+    world.event(RawEvent::Opened(window(3)));
+    // The same partner is hidden again, not the other tile's window.
+    assert_eq!(world.screen.lock().unwrap().minimized, shared);
+}
+
+#[test]
+fn a_drag_wins_over_a_learned_minimum_the_window_has_outgrown() {
+    let mut world = world(None, &[1]);
+    world.screen.lock().unwrap().minimums.insert(2, (550, 0));
+    world.event(RawEvent::Opened(window(2)));
+    assert_eq!(world.last_moves()[&2].w, 550);
+    // It could shrink after all, as a window refusing only while restoring.
+    world.screen.lock().unwrap().minimums.clear();
+    world.event(RawEvent::Dragged(
+        1,
+        Rect {
+            x: 8,
+            y: 8,
+            w: 560,
+            h: 784,
+        },
+        at(0, 0),
+    ));
+    assert_eq!(
+        world.last_moves()[&2],
+        Rect {
+            x: 576,
+            y: 8,
+            w: 416,
+            h: 784
+        }
+    );
+}
+
+#[test]
+fn a_window_dragged_back_over_its_own_tile_previews_it() {
+    let mut world = world(None, &[1, 2]);
+    let tile = Rect {
+        x: 504,
+        y: 8,
+        w: 488,
+        h: 784,
+    };
+    world.event(RawEvent::DragStarted(2, at(700, 20)));
+    world.event(RawEvent::Dragging(2, Rect { x: 100, ..tile }, at(20, 400)));
+    world.screen.lock().unwrap().filled.clear();
+    world.event(RawEvent::Dragging(2, Rect { x: 520, ..tile }, at(700, 400)));
+    let filled = world.screen.lock().unwrap().filled.clone();
+    assert_eq!(filled.last().map(|f| f.0), Some(tile));
+    // Dropping there puts it back; nothing is split or stacked.
+    world.event(RawEvent::Dragged(2, Rect { x: 520, ..tile }, at(700, 400)));
+    assert_eq!(world.last_moves()[&2], tile);
+    assert!(world.screen.lock().unwrap().minimized.is_empty());
+}
+
+#[test]
+fn the_frame_follows_the_system_corner_radius_by_default() {
+    let mut world = world(None, &[1, 2]);
+    world.event(RawEvent::MonitorsChanged(vec![Monitor {
+        id: 1,
+        rect: WORK,
+        work: WORK,
+        corner_radius: 12,
+    }]));
+    world.event(RawEvent::Focused(1));
+    world.event(RawEvent::Focused(2));
+    assert_eq!(world.screen.lock().unwrap().overlay_radius, 12);
 }
