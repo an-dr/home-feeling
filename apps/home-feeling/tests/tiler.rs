@@ -27,6 +27,13 @@ struct Screen {
     overlay: Option<Rect>,
     overlays: std::collections::HashMap<u32, (Rect, String)>,
     minimized: Vec<Id>,
+    /// Windows whose next move ends smaller than asked, once, as a window
+    /// that was minimized does.
+    shrink_once: std::collections::HashSet<Id>,
+    /// The window each badge was asked to sit above.
+    attached: Vec<Id>,
+    /// Popup menus asked for: key, items, and where.
+    menus: Vec<(u32, Vec<home_feeling_desktop::MenuItem>, Point)>,
     /// Sizes windows refuse to go below, as real apps do.
     minimums: std::collections::HashMap<Id, (i32, i32)>,
 }
@@ -60,11 +67,18 @@ impl Backend for Fake {
         screen.moves.push((id, rect));
         // Report the frame the window really took, as Windows does.
         let (min_w, min_h) = screen.minimums.get(&id).copied().unwrap_or((0, 0));
-        let actual = Rect {
+        let mut actual = Rect {
             w: rect.w.max(min_w),
             h: rect.h.max(min_h),
             ..rect
         };
+        if screen.shrink_once.remove(&id) {
+            actual = Rect {
+                w: 300,
+                h: 200,
+                ..rect
+            };
+        }
         screen.pending.push(RawEvent::Moved(id, actual));
         screen.pending.push(RawEvent::Settled(id, actual, rect));
         Ok(())
@@ -80,8 +94,11 @@ impl Backend for Fake {
     fn unregister_hotkey(&mut self, _: u32) {}
     fn set_overlay(&mut self, key: u32, overlay: &Overlay) {
         let mut screen = self.0.lock().unwrap();
-        if overlay.color == "#2f6f5e" && overlay.width == 3 {
+        if overlay.color == "#00bcd4" && overlay.width == 3 {
             screen.overlay = Some(overlay.rect);
+        }
+        if let (Some(_), Some(id)) = (&overlay.badge, overlay.attach) {
+            screen.attached.push(id);
         }
         screen
             .overlays
@@ -94,6 +111,15 @@ impl Backend for Fake {
                 screen.overlay = None;
             }
         }
+    }
+    fn show_menu(
+        &mut self,
+        key: u32,
+        items: &[home_feeling_desktop::MenuItem],
+        at: Point,
+        _: &str,
+    ) {
+        self.0.lock().unwrap().menus.push((key, items.to_vec(), at));
     }
     fn minimize(&mut self, id: Id) -> Result<(), String> {
         let mut screen = self.0.lock().unwrap();
@@ -171,8 +197,11 @@ fn world(backend: Option<Box<dyn Backend>>, initial: &[Id]) -> World {
     }
     std::mem::forget(endpoint);
 
+    let manifest = bones_consent::Manifest::read(&things_dir().join("tiler")).unwrap();
+    let defaults = bones_consent::values(&manifest.settings, &Default::default());
     let mut lua = LuaHost::new(Logger::default())
         .guests_dir(things_dir())
+        .config("tiler", bones_consent::nest(&defaults))
         .startup(["tiler".to_string()])
         .budgets(Duration::from_secs(2), Duration::from_millis(500));
     let control = lua.control();
@@ -274,7 +303,7 @@ fn existing_windows_are_tiled_side_by_side_with_gaps() {
             h: 784
         }
     );
-    assert_eq!(world.screen.lock().unwrap().hotkeys.len(), 10);
+    assert_eq!(world.screen.lock().unwrap().hotkeys.len(), 11);
 }
 
 #[test]
@@ -611,7 +640,7 @@ fn swap_and_toggle_float_by_hotkey_with_a_cyan_frame() {
     );
     let screen = world.screen.lock().unwrap();
     assert!(
-        screen.overlays.values().any(|(_, c)| c == "#00bcd4"),
+        screen.overlays.values().any(|(_, c)| c == "#ffb300"),
         "{:?}",
         screen.overlays
     );
@@ -689,8 +718,9 @@ fn dropping_near_the_bottom_stacks_the_tiles_vertically() {
 }
 
 #[test]
-fn dropping_in_the_middle_of_a_tile_swaps() {
+fn dropping_in_the_middle_of_a_tile_swaps_when_configured_to() {
     let mut world = world(None, &[1, 2]);
+    configure(&mut world, &[("drop_middle", serde_json::json!("swap"))]);
     let start = Rect {
         x: 504,
         y: 8,
@@ -757,4 +787,399 @@ fn a_drag_previews_the_drop_and_clears_it_after() {
         .overlays
         .values()
         .any(|(r, _)| *r == preview));
+}
+
+#[test]
+fn the_dragged_window_has_no_focus_frame_until_it_is_dropped() {
+    let mut world = world(None, &[1, 2]);
+    world.event(RawEvent::Focused(2));
+    assert!(world.screen.lock().unwrap().overlay.is_some());
+    let start = Rect {
+        x: 504,
+        y: 8,
+        w: 488,
+        h: 784,
+    };
+    world.event(RawEvent::DragStarted(2, at(700, 20)));
+    world.event(RawEvent::Dragging(2, Rect { x: 100, ..start }, at(20, 400)));
+    assert_eq!(world.screen.lock().unwrap().overlay, None);
+    world.event(RawEvent::Dragged(2, Rect { x: 100, ..start }, at(20, 400)));
+    assert!(world.screen.lock().unwrap().overlay.is_some());
+}
+
+#[test]
+fn a_setting_from_the_manifest_reaches_the_tiler() {
+    let mut world = world(None, &[1, 2]);
+    world.event(RawEvent::Focused(1));
+    assert!(world.screen.lock().unwrap().overlay.is_some());
+    // The user turns the active window frame off in the Things window.
+    let manifest = bones_consent::Manifest::read(&things_dir().join("tiler")).unwrap();
+    let chosen = [("border.enabled".to_string(), serde_json::json!(false))].into();
+    let values = bones_consent::values(&manifest.settings, &chosen);
+    world
+        .control
+        .set_config("tiler", bones_consent::nest(&values));
+    world.frame();
+    world.event(RawEvent::Focused(2));
+    assert_eq!(world.screen.lock().unwrap().overlay, None);
+}
+
+#[test]
+fn a_badge_counts_a_stack_and_its_menu_picks_the_window_to_show() {
+    let mut world = world(None, &[1]);
+    world.screen.lock().unwrap().minimums.insert(2, (700, 0));
+    world.event(RawEvent::Opened(window(2)));
+    // The badge is the round overlay in the tile's corner.
+    let badge = {
+        let screen = world.screen.lock().unwrap();
+        let found = screen
+            .overlays
+            .iter()
+            .find(|(_, (r, _))| r.w == 28 && r.h == 28);
+        *found.expect("a badge on the stacked tile").0
+    };
+    world.event(RawEvent::OverlayClicked(badge));
+    let (menu, items) = {
+        let screen = world.screen.lock().unwrap();
+        let (key, items, _) = screen.menus.last().expect("a menu").clone();
+        (key, items)
+    };
+    assert_eq!(items.len(), 2);
+    // Window 2 shows; its entry is the checked one.
+    assert_eq!(items.iter().filter(|i| i.checked).count(), 1);
+    assert!(
+        items[1].checked && items[1].label.contains("w2"),
+        "{items:?}"
+    );
+    // Choosing the first entry shows window 1 and hides window 2.
+    world.event(RawEvent::Menu(menu, Some(items[0].id)));
+    assert_eq!(world.screen.lock().unwrap().minimized, vec![2]);
+}
+
+#[test]
+fn dismissing_the_menu_changes_nothing() {
+    let mut world = world(None, &[1]);
+    world.screen.lock().unwrap().minimums.insert(2, (700, 0));
+    world.event(RawEvent::Opened(window(2)));
+    let badge = {
+        let screen = world.screen.lock().unwrap();
+        *screen
+            .overlays
+            .iter()
+            .find(|(_, (r, _))| r.w == 28 && r.h == 28)
+            .unwrap()
+            .0
+    };
+    world.event(RawEvent::OverlayClicked(badge));
+    let menu = world.screen.lock().unwrap().menus.last().unwrap().0;
+    world.event(RawEvent::Menu(menu, None));
+    assert_eq!(world.screen.lock().unwrap().minimized, vec![1]);
+}
+
+fn badge_count(world: &World) -> usize {
+    let screen = world.screen.lock().unwrap();
+    screen
+        .overlays
+        .values()
+        .filter(|(r, _)| r.w == 28 && r.h == 28)
+        .count()
+}
+
+#[test]
+fn a_badge_belongs_to_the_window_the_stack_shows() {
+    let mut world = world(None, &[1]);
+    world.screen.lock().unwrap().minimums.insert(2, (700, 0));
+    world.event(RawEvent::Opened(window(2)));
+    assert_eq!(badge_count(&world), 1);
+    assert_eq!(world.screen.lock().unwrap().attached.last(), Some(&2));
+}
+
+#[test]
+fn a_window_moved_out_of_a_stack_onto_no_tile_floats_and_the_stack_shrinks() {
+    let mut world = world(None, &[1]);
+    world.screen.lock().unwrap().minimums.insert(2, (700, 0));
+    world.event(RawEvent::Opened(window(2)));
+    assert_eq!(badge_count(&world), 1);
+    let tile = Rect {
+        x: 8,
+        y: 8,
+        w: 984,
+        h: 784,
+    };
+    world.event(RawEvent::DragStarted(2, at(500, 20)));
+    world.event(RawEvent::Dragged(
+        2,
+        Rect { x: 1200, ..tile },
+        at(1500, 400),
+    ));
+    // One window is left in the tile, so the badge goes and window 1 is back.
+    assert_eq!(badge_count(&world), 0);
+    assert!(world.screen.lock().unwrap().minimized.is_empty());
+}
+
+#[test]
+fn a_window_moved_out_of_a_stack_onto_the_middle_of_a_tile_joins_that_tile() {
+    let mut world = world(None, &[1, 2]);
+    world.screen.lock().unwrap().minimums.insert(3, (0, 500));
+    world.event(RawEvent::Opened(window(3)));
+    let hidden = world.screen.lock().unwrap().minimized.clone();
+    assert_eq!(hidden.len(), 1, "3 should have stacked onto a tile");
+    let (left, right) = (252, 748);
+    let (own_x, other_x, other) = if hidden[0] == 1 {
+        (left, right, 2)
+    } else {
+        (right, left, 1)
+    };
+    let tile = Rect {
+        x: 8,
+        y: 8,
+        w: 488,
+        h: 784,
+    };
+    world.event(RawEvent::DragStarted(3, at(own_x, 20)));
+    world.event(RawEvent::Dragging(
+        3,
+        Rect { x: 300, ..tile },
+        at(other_x, 400),
+    ));
+    world.event(RawEvent::Dragged(
+        3,
+        Rect { x: 300, ..tile },
+        at(other_x, 400),
+    ));
+    // 3 now shares the other tile; the window it left is back in its own.
+    assert_eq!(world.screen.lock().unwrap().minimized, vec![other]);
+    assert_eq!(badge_count(&world), 1);
+}
+
+/// Gives the tiler these settings over its defaults, as the Things window does.
+fn configure(world: &mut World, chosen: &[(&str, serde_json::Value)]) {
+    let manifest = bones_consent::Manifest::read(&things_dir().join("tiler")).unwrap();
+    let chosen = chosen
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.clone()))
+        .collect();
+    let values = bones_consent::values(&manifest.settings, &chosen);
+    world
+        .control
+        .set_config("tiler", bones_consent::nest(&values));
+    world.frame();
+}
+
+#[test]
+fn dropping_in_the_middle_of_a_tile_stacks_even_when_there_is_room() {
+    let mut world = world(None, &[1, 2]);
+    let start = Rect {
+        x: 504,
+        y: 8,
+        w: 488,
+        h: 784,
+    };
+    world.event(RawEvent::DragStarted(2, at(700, 20)));
+    world.event(RawEvent::Dragging(
+        2,
+        Rect { x: 100, ..start },
+        at(250, 400),
+    ));
+    world.event(RawEvent::Dragged(2, Rect { x: 100, ..start }, at(250, 400)));
+    // 2 shares 1's tile, which now takes the whole area; 1 waits behind it.
+    assert_eq!(world.screen.lock().unwrap().minimized, vec![1]);
+    assert_eq!(badge_count(&world), 1);
+    assert_eq!(
+        world.last_moves()[&2],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 984,
+            h: 784
+        }
+    );
+}
+
+#[test]
+fn a_new_window_can_join_the_focused_tile_when_configured_to() {
+    let mut world = world(None, &[1]);
+    configure(&mut world, &[("new_window", serde_json::json!("stack"))]);
+    world.event(RawEvent::Focused(1));
+    world.event(RawEvent::Opened(window(2)));
+    assert_eq!(world.screen.lock().unwrap().minimized, vec![1]);
+    assert_eq!(badge_count(&world), 1);
+}
+
+#[test]
+fn a_change_of_monitors_keeps_the_stacks() {
+    let mut world = world(None, &[1, 2]);
+    let start = Rect {
+        x: 504,
+        y: 8,
+        w: 488,
+        h: 784,
+    };
+    world.event(RawEvent::DragStarted(2, at(700, 20)));
+    world.event(RawEvent::Dragging(
+        2,
+        Rect { x: 100, ..start },
+        at(250, 400),
+    ));
+    world.event(RawEvent::Dragged(2, Rect { x: 100, ..start }, at(250, 400)));
+    assert_eq!(badge_count(&world), 1);
+    world.event(RawEvent::MonitorsChanged(vec![Monitor {
+        id: 1,
+        rect: WORK,
+        work: WORK,
+    }]));
+    assert_eq!(badge_count(&world), 1);
+    assert_eq!(world.screen.lock().unwrap().minimized, vec![1]);
+}
+
+#[test]
+fn a_stacked_window_can_split_its_own_tile() {
+    let mut world = world(None, &[1, 2]);
+    let start = Rect {
+        x: 504,
+        y: 8,
+        w: 488,
+        h: 784,
+    };
+    // 2 is dropped on the middle of 1's tile: they share it, 2 showing.
+    world.event(RawEvent::DragStarted(2, at(700, 20)));
+    world.event(RawEvent::Dragging(
+        2,
+        Rect { x: 100, ..start },
+        at(250, 400),
+    ));
+    world.event(RawEvent::Dragged(2, Rect { x: 100, ..start }, at(250, 400)));
+    assert_eq!(badge_count(&world), 1);
+    // Dragged to the left edge of the same tile, 2 splits it and takes the left.
+    let whole = Rect {
+        x: 8,
+        y: 8,
+        w: 984,
+        h: 784,
+    };
+    world.event(RawEvent::DragStarted(2, at(500, 20)));
+    world.event(RawEvent::Dragging(2, Rect { x: 200, ..whole }, at(20, 400)));
+    world.event(RawEvent::Dragged(2, Rect { x: 200, ..whole }, at(20, 400)));
+    assert_eq!(badge_count(&world), 0);
+    assert!(world.screen.lock().unwrap().minimized.is_empty());
+    let moves = world.last_moves();
+    assert_eq!(
+        moves[&2],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 488,
+            h: 784
+        }
+    );
+    assert_eq!(
+        moves[&1],
+        Rect {
+            x: 504,
+            y: 8,
+            w: 488,
+            h: 784
+        }
+    );
+}
+
+#[test]
+fn caps_lock_floats_and_tiles_like_the_toggle_key() {
+    let mut world = world(None, &[1, 2]);
+    world.event(RawEvent::Focused(1));
+    world.press("capslock");
+    // 1 floats, so 2 takes the whole area.
+    assert_eq!(
+        world.last_moves()[&2],
+        Rect {
+            x: 8,
+            y: 8,
+            w: 984,
+            h: 784
+        }
+    );
+    world.press("capslock");
+    // Pressed again, 1 is back in the layout beside 2.
+    assert_eq!(world.last_moves()[&2].w, 488);
+}
+
+#[test]
+fn a_floating_window_is_moved_freely_and_never_tiled_by_a_drag() {
+    let mut world = world(None, &[1, 2]);
+    world.event(RawEvent::Focused(2));
+    world.press("alt+shift+space");
+    let moves_before = world.screen.lock().unwrap().moves.len();
+    let rect = Rect {
+        x: 100,
+        y: 100,
+        w: 300,
+        h: 200,
+    };
+    world.event(RawEvent::DragStarted(2, at(200, 110)));
+    // Over the middle of tile 1: a tiled window would preview a drop here.
+    world.event(RawEvent::Dragging(2, rect, at(500, 400)));
+    assert!(!world
+        .screen
+        .lock()
+        .unwrap()
+        .overlays
+        .values()
+        .any(|(r, c)| c == "#00bcd4" && r.w > 28 && r.h > 28 && r.h != 0 && r.w == 984));
+    world.event(RawEvent::Dragged(2, rect, at(500, 400)));
+    // Nothing tiled it: no move was asked of any window.
+    assert_eq!(world.screen.lock().unwrap().moves.len(), moves_before);
+}
+
+#[test]
+fn an_enlarged_window_leaves_its_stack_and_returns_when_restored() {
+    let mut world = world(None, &[1, 2]);
+    let start = Rect {
+        x: 504,
+        y: 8,
+        w: 488,
+        h: 784,
+    };
+    // 2 is dropped on 1's middle: they share a tile, 2 showing.
+    world.event(RawEvent::DragStarted(2, at(700, 20)));
+    world.event(RawEvent::Dragging(
+        2,
+        Rect { x: 100, ..start },
+        at(250, 400),
+    ));
+    world.event(RawEvent::Dragged(2, Rect { x: 100, ..start }, at(250, 400)));
+    assert_eq!(badge_count(&world), 1);
+    assert_eq!(world.screen.lock().unwrap().minimized, vec![1]);
+    // Enlarged, 2 leaves: 1 is back in its tile alone, and the badge goes.
+    world.event(RawEvent::Maximized(2, true));
+    assert_eq!(badge_count(&world), 0);
+    assert!(world.screen.lock().unwrap().minimized.is_empty());
+    // Restored, 2 joins 1's stack again.
+    world.event(RawEvent::Maximized(2, false));
+    assert_eq!(badge_count(&world), 1);
+    assert_eq!(world.screen.lock().unwrap().minimized, vec![1]);
+}
+
+#[test]
+fn a_window_that_ends_smaller_than_its_tile_is_moved_again() {
+    let mut world = world(None, &[1]);
+    world.screen.lock().unwrap().shrink_once.insert(2);
+    world.event(RawEvent::Opened(window(2)));
+    let moves_of_2 = world
+        .screen
+        .lock()
+        .unwrap()
+        .moves
+        .iter()
+        .filter(|(id, _)| *id == 2)
+        .count();
+    assert!(moves_of_2 >= 2, "asked {moves_of_2} time(s)");
+    assert_eq!(
+        world.last_moves()[&2],
+        Rect {
+            x: 504,
+            y: 8,
+            w: 488,
+            h: 784
+        }
+    );
 }

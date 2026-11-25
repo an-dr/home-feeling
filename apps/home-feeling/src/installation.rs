@@ -38,6 +38,16 @@ pub fn install_dir() -> Option<PathBuf> {
     UpgradeModule::new(config()).install_dir()
 }
 
+/// What a login should start: the installed launcher, whose path survives
+/// updates, or the running program when it is not installed.
+pub fn startup_exe() -> Option<PathBuf> {
+    if running_installed() {
+        install_dir().map(|dir| dir.join(identity().launcher_exe()))
+    } else {
+        std::env::current_exe().ok()
+    }
+}
+
 /// Whether this process runs from the install folder, not from an unpacked build.
 pub fn running_installed() -> bool {
     match (std::env::current_exe(), install_dir()) {

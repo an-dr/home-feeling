@@ -9,7 +9,7 @@ name = "home-feeling-app"
 path = "src/main.rs"
 
 [dependencies]
-bones-kernel = { path = "../../vendor/bones/crates/bones-kernel", default-features = false, features = ["presentation", "upgrade", "desktop"] }
+bones-kernel = { path = "../../vendor/bones/crates/bones-kernel", default-features = false, features = ["presentation", "upgrade", "desktop", "instance"] }
 # bones links SDL3; building it from source statically keeps the app one file.
 sdl3 = { version = "0.18.4", features = ["build-from-source-static", "unsafe_textures"] }
 bones-consent = { path = "../../crates/bones-consent" }
@@ -22,6 +22,7 @@ serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.21"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tempfile = "3"

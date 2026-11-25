@@ -3,8 +3,11 @@
 // A release build is a desktop app, so Windows must not open a console behind it.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
+mod background;
 mod builtins;
 mod capabilities;
+mod color;
 mod installation;
 mod paths;
 mod settings;
@@ -34,6 +37,26 @@ fn main() {
 }
 
 fn run() -> bones_kernel::Result<()> {
+    // One copy per user: a later launch hands over to this one, which comes
+    // back from the tray, and ends.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let handoff = bones_kernel::instance::Handoff {
+        args: args.clone(),
+        cwd: std::env::current_dir().unwrap_or_default(),
+    };
+    let primary = match bones_kernel::instance::claim(
+        "home-feeling",
+        handoff,
+        std::time::Duration::from_secs(2),
+    ) {
+        Ok(bones_kernel::instance::Claim::HandedOff) => return Ok(()),
+        Ok(bones_kernel::instance::Claim::Primary(primary)) => Some(primary),
+        Err(error) => {
+            eprintln!("single instance is off: {error}");
+            None
+        }
+    };
+    let start_hidden = args.iter().any(|arg| arg == "--minimized");
     installation::refresh_launcher();
     let logger = Logger::default();
     let things_dir = paths::things_dir();
@@ -41,6 +64,11 @@ fn run() -> bones_kernel::Result<()> {
     let offered = builtins::install(&things_dir, &data_dir.join("builtins.json"));
     let consent = Consent::open(data_dir.join("consent.json"), capabilities::all());
     let settings = settings::Settings::open(data_dir.join("settings.json"));
+    // The startup entry names a path; write it again so a moved install heals.
+    let app = settings.app();
+    if app.autostart {
+        let _ = autostart::set(true, app.start_minimized);
+    }
 
     let mut lua = LuaHost::new(logger.clone()).guests_dir(&things_dir);
     let mut startup = Vec::new();
@@ -52,6 +80,8 @@ fn run() -> bones_kernel::Result<()> {
         let deny = consent.deny_list(&thing, &manifest);
         denied.insert(thing.clone(), deny.clone());
         lua = lua.permissions(&thing, Permissions::deny(deny));
+        let values = bones_consent::values(&manifest.settings, &settings.chosen(&thing));
+        lua = lua.config(&thing, bones_consent::nest(&values));
         let answered = matches!(consent.status(&thing, &manifest), Status::Answered { .. });
         if settings.enabled(&thing) && answered {
             startup.push(thing);
@@ -62,7 +92,7 @@ fn run() -> bones_kernel::Result<()> {
     let (update_tx, update_rx) = std::sync::mpsc::channel();
     let (result_tx, result_rx) = std::sync::mpsc::channel();
 
-    bones_kernel::Kernel::new()
+    let kernel = bones_kernel::Kernel::new()
         .logger(logger.clone())
         .window(installation::NAME, 900, 600)
         .renderer()
@@ -88,9 +118,13 @@ fn run() -> bones_kernel::Result<()> {
                     requests: update_tx,
                     results: result_rx,
                 },
-            ),
-        ))
-        .run()
+            )
+            .start_in_tray(start_hidden),
+        ));
+    match primary {
+        Some(primary) => kernel.single_instance(primary).run(),
+        None => kernel.run(),
+    }
 }
 
 /// The folders in `dir` that hold an `init.lua`.

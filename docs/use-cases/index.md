@@ -10,8 +10,8 @@ What home-feeling must do, and what its users see when it works. Identifiers are
 
 ## Areas
 
-- [Things](things.md): UC-THINGS-01 to 05. Listing, reloading, diagnosing, approving, and configuring Things.
-- [Tiling](tiling.md): UC-TILE-01 to 05. The tiling window manager Thing, Windows only.
+- [Things](things.md): UC-THINGS-01 to 06. Listing, reloading, diagnosing, approving, and configuring Things.
+- [Tiling](tiling.md): UC-TILE-01 to 06. The tiling window manager Thing, Windows only.
 - [Install, update, and release](install.md): UC-INSTALL-01, 02, UC-UPDATE-01, UC-RELEASE-01.
 
 ## Not in v1

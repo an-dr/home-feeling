@@ -161,6 +161,7 @@ dependencies = [
  "bones-messages",
  "bones-module-desktop",
  "bones-module-renderer",
+ "bones-module-single-instance",
  "bones-module-ui",
  "bones-module-upgrade",
 ]
@@ -221,6 +222,16 @@ dependencies = [
  "send_wrapper",
  "windows-sys 0.61.2",
  "x11rb",
+]
+
+[[package]]
+name = "bones-module-single-instance"
+version = "5.0.1"
+dependencies = [
+ "bones-kernel-infra",
+ "bones-messages",
+ "libc",
+ "windows",
 ]
 
 [[package]]
@@ -994,6 +1005,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tray-icon",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -12,6 +12,8 @@ local QUERY = "desktop/windows/query"
 local windows = {}   -- id -> window info, with the real frame in .rect
 local floating = {}  -- id -> true for windows outside the layout
 local maximized = {} -- id -> true while the user has it maximized
+local returns = {}   -- id -> a window of the stack it left by being enlarged
+local retries = {}   -- id -> how often a window that ended elsewhere was moved again
 local minimum = {}   -- id -> { w?, h? } a window refused to go below
 local pending = {}   -- id -> true while a move we asked for has not settled
 local hidden = {}    -- id -> true for stack members we minimized
@@ -40,11 +42,18 @@ local GAP = setting("gap", 8)
 local MIN_W = setting("min_width", 400)
 local MIN_H = setting("min_height", 300)
 local BORDER = setting("border", {})
-local FOCUS_COLOR = BORDER.color or "#2f6f5e"
+local FOCUS_COLOR = BORDER.color or "#00bcd4"
 local FOCUS_WIDTH = BORDER.width or 3
-local FLOAT_COLOR = BORDER.float_color or "#00bcd4"
+local FLOAT_COLOR = BORDER.float_color or "#ffb300"
+local DROP_FILL = BORDER.drop_fill or 0.25
 local TAB_COLOR = BORDER.tab_color or "#7f8c8d"
-local BORDERS = BORDER.enabled ~= false
+local BADGE_COLOR = BORDER.badge_color or "#00838f"
+local BADGE_SIZE = 28
+-- What dropping a window on the middle of a tile does, and where a new window goes.
+local DROP_MIDDLE = setting("drop_middle", "stack")
+local NEW_WINDOW = setting("new_window", "split")
+local FOCUS_FRAME = BORDER.enabled ~= false
+local RADIUS = BORDER.radius or 0
 
 -- Sizes --------------------------------------------------------------------
 
@@ -189,25 +198,36 @@ end
 
 -- Overlays -----------------------------------------------------------------
 
-local function overlay(id, rect, color, width, want)
+local function overlay(id, rect, color, width, want, fill, badge, attach)
   want[id] = true
-  bones.publish("desktop/overlay/set", { id = id, rect = rect, color = color, width = width })
+  -- Tab strips are lines; everything else follows the configured corners.
+  local radius = rect.h > 0 and RADIUS or 0
+  bones.publish("desktop/overlay/set",
+    { id = id, rect = rect, color = color, width = width, fill = fill, radius = radius,
+      badge = badge, attach = attach })
+end
+
+-- The badge sits in the top left corner of the tile, tucked close to it.
+local function badge_rect(rect)
+  return { x = rect.x + 2, y = rect.y + 2, w = BADGE_SIZE, h = BADGE_SIZE }
 end
 
 -- Draws every overlay from the current state and clears the rest: the focus
--- border, a cyan frame on each floating window, a tab strip over each stack,
--- and the drop preview while the user drags.
+-- border (unless disabled), an amber frame on each floating window, a tab strip over each stack,
+-- and the drop preview while the user drags. The window being dragged gets no
+-- frame: it would lag behind the cursor.
 local function decorate()
   local want = {}
-  if BORDERS then
+  do
     for id in pairs(floating) do
       local window = windows[id]
-      if window and not maximized[id] and not hidden[id] then
+      if window and not maximized[id] and not hidden[id] and not (drag and drag.id == id) then
         overlay("float:" .. id, window.rect, FLOAT_COLOR, id == focused and FOCUS_WIDTH or 2, want)
       end
     end
     local window = focused and windows[focused]
-    if window and not floating[focused] and not hidden[focused] then
+    if FOCUS_FRAME and window and not floating[focused] and not hidden[focused]
+      and not (drag and drag.id == focused) then
       overlay("focus", window.rect, FOCUS_COLOR, FOCUS_WIDTH, want)
     end
     for _, tree in pairs(trees) do
@@ -222,12 +242,15 @@ local function decorate()
             overlay("tab:" .. leaf.stack[1] .. ":" .. i, segment,
               member == leaf.window and FOCUS_COLOR or TAB_COLOR, 2, want)
           end
+          -- A badge in the corner counts the windows and opens the picker.
+          overlay("badge:" .. leaf.stack[1], badge_rect(rect), BADGE_COLOR, 0, want, nil, tostring(n),
+            windows[leaf.window] and windows[leaf.window].id)
         end
       end
     end
   end
   if drag and drag.preview then
-    overlay("drop", drag.preview, FOCUS_COLOR, 4, want)
+    overlay("drop", drag.preview, FOCUS_COLOR, 4, want, DROP_FILL)
   end
   for id in pairs(shown) do
     if not want[id] then bones.publish("desktop/overlay/clear", { id = id }) end
@@ -287,6 +310,8 @@ end
 
 -- Stacks -------------------------------------------------------------------
 
+local picking = nil -- first member of the stack whose picker is open
+
 -- Shows `id` in its stack: the member shown before is minimized.
 local function show(leaf, id)
   local before = leaf.window
@@ -344,7 +369,7 @@ end
 
 -- Adds a window to its monitor's tree: a split of the focused tile when it
 -- fits, a stack when it does not (UC-TILE-02). Returns whether it was tiled.
-local function insert(id)
+local function insert(id, fresh)
   local window = windows[id]
   local monitor_id = monitor_of(window)
   if not monitor_id then return false end
@@ -353,6 +378,14 @@ local function insert(id)
     trees[monitor_id] = { window = id }
     floating[id] = nil
     return true
+  end
+  if fresh and NEW_WINDOW == "stack" then
+    -- A window that just opened joins the focused tile even where there is room.
+    local focus_leaf = focused and focused ~= id and find(tree, focused)
+    if focus_leaf then
+      stack_onto(focus_leaf, id)
+      return true
+    end
   end
   local rects = {}
   layout(tree, area(monitors[monitor_id]), rects)
@@ -503,14 +536,21 @@ end
 
 -- Where a window dropped at `cursor` would go: the tile under the cursor
 -- (not the dragged window's own) and the zone within it. The middle third
--- swaps; elsewhere the nearest edge picks the side of a split.
+-- stacks or swaps, as configured; elsewhere the nearest edge picks the side
+-- of a split.
 local function drop_target(id, cursor)
+  -- A window shown in a stack may also split its own tile: it leaves the
+  -- stack for the side of the tile its cursor is nearest to.
+  local own = find_any(id)
+  local stacked = own and own.stack and #own.stack > 1
   for other, rect in pairs(placed) do
-    if other ~= id and cursor.x >= rect.x and cursor.x < rect.x + rect.w
+    if (other ~= id or stacked) and cursor.x >= rect.x and cursor.x < rect.x + rect.w
       and cursor.y >= rect.y and cursor.y < rect.y + rect.h then
       local u, v = (cursor.x - rect.x) / rect.w, (cursor.y - rect.y) / rect.h
       if u > 1 / 3 and u < 2 / 3 and v > 1 / 3 and v < 2 / 3 then
-        return other, "swap", rect
+        -- Its own tile's middle means no change.
+        if other == id then return nil end
+        return other, "middle", rect
       end
       local zone, distance = "left", u
       if 1 - u < distance then zone, distance = "right", 1 - u end
@@ -525,7 +565,27 @@ local function drop_target(id, cursor)
 end
 
 local function drop(id, target, zone)
-  if zone == "swap" then
+  local own = find_any(id)
+  if target == id then
+    -- A stacked window dropped on an edge of its own tile: the tile splits,
+    -- the window takes that side, and the rest of the stack keeps the other.
+    if not (own and own.stack and #own.stack > 1) then return end
+    remove(id)
+    local dir = (zone == "left" or zone == "right") and "h" or "v"
+    split_leaf(own, dir, id, zone == "left" or zone == "top")
+    floating[id] = nil
+    return
+  end
+  if zone == "middle" and (DROP_MIDDLE == "stack" or (own and own.stack and #own.stack > 1)) then
+    -- Dropped on the middle of a tile, there being room or not: the window
+    -- joins that tile's windows, and a stack it left loses one. Dragging out
+    -- of a stack never swaps whole stacks.
+    remove(id)
+    local leaf = find_any(target)
+    if leaf then stack_onto(leaf, id) end
+    return
+  end
+  if zone == "middle" then
     local own, other = find_any(id), find_any(target)
     if own and other then
       swap_leaves(own, other)
@@ -608,6 +668,9 @@ function actions.toggle_float()
   apply()
 end
 
+-- A second key for the same toggle, which Caps Lock fits.
+actions.toggle_float_alt = actions.toggle_float
+
 -- Shows the next window of the focused tile's stack.
 function actions.stack_next()
   local leaf = focused and find_any(focused)
@@ -634,6 +697,7 @@ end
 local function forget(id)
   local was_tiled = remove(id)
   windows[id], floating[id], maximized[id], pending[id], hidden[id] = nil, nil, nil, nil, nil
+  returns[id], retries[id] = nil, nil
   if focused == id then focused = nil end
   if was_tiled then apply() else decorate() end
 end
@@ -650,8 +714,8 @@ local function on_opened(window)
     hidden[id] = nil
     show(leaf, id)
     apply()
-  elseif not known or not (leaf or floating[id]) then
-    insert(id)
+  elseif not known or not (leaf or floating[id] or returns[id]) then
+    insert(id, true)
     apply()
   end
 end
@@ -684,15 +748,76 @@ local function on_settled(event)
     if tiled(id) and not maximized[id]
       and (event.rect.w > tile.w + SLACK or event.rect.h > tile.h + SLACK) then
       refused(id, event.rect)
+    elseif tiled(id) and not maximized[id] and not same(event.rect, tile) then
+      -- It came out smaller than asked, as a window just brought back from
+      -- the taskbar may: ask again, a couple of times at most, so a window
+      -- that cannot take its tile does not make this loop.
+      if (retries[id] or 0) < 2 then
+        retries[id] = (retries[id] or 0) + 1
+        pending[id] = true
+        bones.publish("desktop/windows/move", { id = window.id, rect = tile })
+      end
+    else
+      retries[id] = nil
     end
   end
   if id == focused or floating[id] then decorate() end
 end
 
+-- The badge was clicked: ask the user which window of the stack to show.
+local function on_overlay_clicked(event)
+  if event.owner ~= bones.name then return end
+  local first = tostring(event.id):match("^badge:(.+)$")
+  local leaf = first and find_any(first)
+  local rect = leaf and placed[leaf.window]
+  if not (leaf and leaf.stack and rect) then return end
+  local items = {}
+  for i, member in ipairs(leaf.stack) do
+    local title = windows[member] and windows[member].title or tostring(member)
+    if #title > 90 then title = title:sub(1, 89) .. "…" end
+    table.insert(items, {
+      id = i,
+      label = title,
+      checked = member == leaf.window,
+      window = windows[member] and windows[member].id,
+    })
+  end
+  picking = first
+  local at = badge_rect(rect)
+  bones.publish("desktop/overlay/menu", {
+    id = "stack",
+    items = items,
+    at = { x = at.x, y = at.y + at.h + 4 },
+    accent = FOCUS_COLOR,
+  })
+end
+
+-- The user chose a window in the picker.
+local function on_overlay_chosen(event)
+  if event.owner ~= bones.name or event.id ~= "stack" then return end
+  local first = picking
+  picking = nil
+  local leaf = first and find_any(first)
+  local member = leaf and leaf.stack and event.item and leaf.stack[event.item]
+  if not member then return end
+  show(leaf, member)
+  apply()
+  bones.publish("desktop/windows/focus", { id = windows[member].id })
+end
+
 local function on_drag_started(event)
   local id = key(event.id)
-  if windows[id] and not maximized[id] then
-    drag = { id = id, rect = windows[id].rect }
+  -- A floating window moves freely: only the toggle key tiles it, so a drag
+  -- shows no drop preview and places it nowhere.
+  if windows[id] and not maximized[id] and not floating[id] then
+    -- A drag that starts on the window's own border is a resize; any other
+    -- is a move. Decided once here: crossing to a monitor with another scale
+    -- changes the window's size mid-move, which size alone cannot tell apart.
+    local r, c = windows[id].rect, event.cursor
+    local edge = 8
+    local resizing = c and (c.x < r.x + edge or c.x >= r.x + r.w - edge
+      or c.y < r.y + edge or c.y >= r.y + r.h - edge)
+    drag = { id = id, rect = r, moving = not resizing }
   end
 end
 
@@ -701,10 +826,8 @@ local function on_dragging(event)
   local id = key(event.id)
   if not drag or drag.id ~= id then return end
   windows[id].rect = event.rect
-  local moving = math.abs(event.rect.w - drag.rect.w) <= SLACK
-    and math.abs(event.rect.h - drag.rect.h) <= SLACK
   local target, zone, preview
-  if moving then target, zone, preview = drop_target(id, event.cursor) end
+  if drag.moving then target, zone, preview = drop_target(id, event.cursor) end
   if not same(preview, drag.preview) or zone ~= drag.zone then
     drag.target, drag.zone, drag.preview = target, zone, preview
     decorate()
@@ -725,8 +848,19 @@ local function on_dragged(event)
     decorate()
     return
   end
+  local leaf = find_any(id)
+  local tile = placed[id]
+  local cursor = event.cursor
+  local left_tile = tile and cursor
+    and (cursor.x < tile.x or cursor.x >= tile.x + tile.w or cursor.y < tile.y or cursor.y >= tile.y + tile.h)
   if current and current.id == id and current.target then
     drop(id, current.target, current.zone)
+  elseif current and current.id == id and current.moving and left_tile
+    and leaf and leaf.stack and #leaf.stack > 1 then
+    -- Moved out of its stack onto no tile: it floats where it was dropped,
+    -- and the stack loses one.
+    remove(id)
+    floating[id] = true
   elseif tiled(id) then
     -- A resize moves its split; a move without a target snaps back.
     resized(id, event.rect)
@@ -744,6 +878,8 @@ local handlers = {
   end,
   ["desktop/windows/moved"] = on_moved,
   ["desktop/windows/settled"] = on_settled,
+  ["desktop/overlay/clicked"] = on_overlay_clicked,
+  ["desktop/overlay/chosen"] = on_overlay_chosen,
   ["desktop/windows/drag-started"] = on_drag_started,
   ["desktop/windows/dragging"] = on_dragging,
   ["desktop/windows/dragged"] = on_dragged,
@@ -751,21 +887,59 @@ local handlers = {
     local id = key(event.id)
     if not windows[id] then return end
     maximized[id] = event.maximized or nil
-    if not event.maximized then apply() else decorate() end
+    if event.maximized then
+      local leaf = find_any(id)
+      if leaf and leaf.stack and #leaf.stack > 1 then
+        -- Enlarged, a stacked window leaves its stack, which shows the next
+        -- window; it remembers where it came from.
+        remove(id)
+        returns[id] = leaf.window
+        apply()
+      else
+        decorate()
+      end
+    else
+      -- Back to normal size, it rejoins the stack it left, if that is still
+      -- there, and otherwise takes a place like any window.
+      local anchor = returns[id]
+      returns[id] = nil
+      if anchor and not tiled(id) then
+        local leaf = find_any(anchor)
+        if leaf then stack_onto(leaf, id) else insert(id) end
+      end
+      apply()
+    end
   end,
   ["desktop/monitors/changed"] = function(event)
     load_monitors(event.monitors)
-    local ids = {}
-    for id in pairs(windows) do
-      if tiled(id) then table.insert(ids, id) end
-      if hidden[id] then
-        hidden[id] = nil
-        bones.publish("desktop/windows/restore", { id = windows[id].id })
+    -- Layouts stay as they are, stacks included, and refit to their monitor.
+    -- Only the windows of a monitor that went away move to another one, each
+    -- stack together.
+    local orphans = {}
+    for monitor_id, tree in pairs(trees) do
+      if not monitors[monitor_id] then
+        for _, leaf in ipairs(leaves(tree)) do
+          table.insert(orphans, leaf.stack and { table.unpack(leaf.stack) } or { leaf.window })
+        end
+        trees[monitor_id] = nil
       end
     end
-    trees = {}
-    table.sort(ids)
-    for _, id in ipairs(ids) do insert(id) end
+    table.sort(orphans, function(a, b) return a[1] < b[1] end)
+    for _, group in ipairs(orphans) do
+      -- The window the stack showed goes first; the rest join it hidden.
+      local shown = group[1]
+      for _, member in ipairs(group) do
+        if not hidden[member] then shown = member end
+      end
+      insert(shown)
+      local leaf = find_any(shown)
+      for _, member in ipairs(group) do
+        if leaf and member ~= shown then
+          leaf.stack = leaf.stack or { shown }
+          table.insert(leaf.stack, member)
+        end
+      end
+    end
     apply()
   end,
   ["desktop/hotkeys/pressed"] = function(event)
@@ -795,7 +969,9 @@ function init()
   for topic in pairs(handlers) do bones.subscribe(topic) end
   for name, keys in pairs(setting("keys", {})) do
     if actions[name] then
-      bones.publish("desktop/hotkeys/register", { id = name, keys = keys })
+      if keys ~= "" then
+        bones.publish("desktop/hotkeys/register", { id = name, keys = keys })
+      end
     else
       bones.warn("unknown action in keys: " .. name)
     end
