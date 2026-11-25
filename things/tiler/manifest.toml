@@ -79,10 +79,10 @@ max = 12
 key = "border.radius"
 type = "int"
 label = "Corner radius"
-description = "In pixels; 0 is square. Windows 11 rounds its windows by about 8."
+description = "In pixels; 0 is square, -1 follows the system: the corners Windows 11 draws, scaled to each monitor."
 section = "Active window frame"
-default = 0
-min = 0
+default = -1
+min = -1
 max = 32
 
 [[settings]]
@@ -195,3 +195,11 @@ type = "keys"
 label = "Next window in the stack"
 section = "Hotkeys"
 default = "alt+shift+n"
+
+[[settings]]
+key = "trace"
+type = "bool"
+label = "Trace window positions"
+description = 'Records every window event and every move the tiler asks for, one JSON object per line, to window-trace.jsonl in %LOCALAPPDATA%\home-feeling. Turn it on, reproduce a layout problem, turn it off, and share the file. Window titles are included.'
+section = "Diagnostics"
+default = false

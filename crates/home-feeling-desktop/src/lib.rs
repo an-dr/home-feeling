@@ -24,7 +24,7 @@ pub use keys::{Hotkey, Key, Modifiers};
 pub use protocol::MenuItem;
 use protocol::{
     Capabilities, HotkeyRequest, Id, IdOnly, MenuRequest, Monitor, MoveRequest, Overlay,
-    OverlayRequest, Point, Rect, Snapshot, WindowInfo,
+    OverlayRequest, Point, Rect, Snapshot, TraceRequest, WindowInfo,
 };
 pub use trace::Trace;
 
@@ -164,6 +164,10 @@ struct State {
     /// For a guest that is reloading: what its replacement asked for so far.
     renewed: HashMap<String, HashSet<Owned>>,
     inbox: Vec<Envelope>,
+    /// The guests that asked for the window trace.
+    tracers: HashSet<String>,
+    /// Moves asked for with a delay, and when each is due.
+    delayed: Vec<(std::time::Instant, MoveRequest)>,
 }
 
 impl State {
@@ -179,6 +183,9 @@ impl State {
     }
 
     fn release(&mut self, owner: &str, keep: Option<&HashSet<Owned>>) {
+        if keep.is_none() {
+            self.tracers.remove(owner);
+        }
         let gone =
             |owned: &Owned| owned.0 == owner && !keep.is_some_and(|keep| keep.contains(owned));
         let hotkeys: Vec<(Owned, u32)> = self
@@ -235,13 +242,16 @@ impl Desktop {
                 next_key: 0,
                 renewed: HashMap::new(),
                 inbox: Vec::new(),
+                tracers: HashSet::new(),
+                delayed: Vec::new(),
             }))),
             bus: None,
             trace: Trace::off(),
         }
     }
 
-    /// Records what the module sees and does to `trace` while it is enabled.
+    /// Records what the module sees and does to `trace` while a guest asks
+    /// for it on `desktop/windows/trace`.
     pub fn trace(mut self, trace: Trace) -> Self {
         self.trace = trace;
         self
@@ -285,9 +295,27 @@ impl Desktop {
             }
             "desktop/windows/move" => {
                 let request: MoveRequest = serde_json::from_slice(payload).map_err(parse_error)?;
+                // A newer move of the window replaces one still waiting.
                 state
-                    .backend
-                    .move_window(request.id, request.rect, request.raise)?;
+                    .delayed
+                    .retain(|(_, waiting)| waiting.id != request.id);
+                if request.delay > 0 {
+                    let due = std::time::Instant::now()
+                        + std::time::Duration::from_millis(request.delay.into());
+                    state.delayed.push((due, request));
+                } else {
+                    state
+                        .backend
+                        .move_window(request.id, request.rect, request.raise)?;
+                }
+            }
+            "desktop/windows/trace" => {
+                let request: TraceRequest = serde_json::from_slice(payload).map_err(parse_error)?;
+                if request.on {
+                    state.tracers.insert(owner);
+                } else {
+                    state.tracers.remove(&owner);
+                }
             }
             "desktop/windows/focus" => {
                 let request: IdOnly = serde_json::from_slice(payload).map_err(parse_error)?;
@@ -493,6 +521,7 @@ impl Module for Desktop {
         for topic in [
             "desktop/windows/move",
             "desktop/windows/focus",
+            "desktop/windows/trace",
             "desktop/windows/minimize",
             "desktop/windows/restore",
             "desktop/hotkeys/*",
@@ -511,6 +540,19 @@ impl Module for Desktop {
             let snapshot = state.backend.snapshot();
             self.trace
                 .record(serde_json::json!({ "kind": "snapshot", "snapshot": snapshot }));
+        }
+        let now = std::time::Instant::now();
+        let (due, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut state.delayed)
+            .into_iter()
+            .partition(|(at, _)| *at <= now);
+        state.delayed = waiting;
+        for (_, request) in due {
+            if let Err(err) = state
+                .backend
+                .move_window(request.id, request.rect, request.raise)
+            {
+                self.logger.warn(ENDPOINT, &format!("delayed move: {err}"));
+            }
         }
         let events = state.backend.poll();
         // A window that moves many times in a frame is reported once.
@@ -564,6 +606,14 @@ impl Module for Desktop {
                     ENDPOINT,
                     &format!("{} from '{}': {err}", envelope.topic, envelope.sender),
                 );
+            }
+            // Started or stopped by a request, or by its guest stopping.
+            let wanted = !state.tracers.is_empty();
+            if wanted != self.trace.enabled() {
+                if let Err(err) = self.trace.set_enabled(wanted) {
+                    self.logger.warn(ENDPOINT, &err);
+                    state.tracers.clear();
+                }
             }
         }
     }

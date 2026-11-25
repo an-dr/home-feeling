@@ -509,6 +509,7 @@ fn monitors() -> Vec<Monitor> {
                 id: monitor as Id,
                 rect: rect(info.rcMonitor),
                 work: rect(info.rcWork),
+                corner_radius: corner_radius(monitor),
             });
         }
         1
@@ -537,11 +538,11 @@ unsafe extern "system" fn on_event(
     if object == OBJID_WINDOW && child == CHILDID_SELF as i32 && !hwnd.is_null() {
         note(Note::Window(event, hwnd as isize));
         // Another window came forward, perhaps over a badge's window.
-        restack_badges();
+        restack_attached();
     }
 }
 
-/// Where a badge goes to sit just above `target`: the window to insert it
+/// Where an attached overlay goes to sit just above `target`: the window to insert it
 /// after, or `None` when it already is there.
 unsafe fn place_above(target: HWND, badge: HWND) -> Option<HWND> {
     if IsWindow(target) == 0 {
@@ -552,7 +553,16 @@ unsafe fn place_above(target: HWND, badge: HWND) -> Option<HWND> {
         return Some(HWND_TOPMOST);
     }
     let above = GetWindow(target, GW_HWNDPREV);
-    if above == badge {
+    // Several overlays may sit above one window, such as a frame and its
+    // fill: any of them right above it counts as in place.
+    let mut next = above;
+    while !next.is_null()
+        && next != badge
+        && ATTACHED.with(|a| a.borrow().contains_key(&(next as isize)))
+    {
+        next = GetWindow(next, GW_HWNDPREV);
+    }
+    if next == badge {
         None
     } else if above.is_null() || topmost(above) {
         // Nothing ordinary is in front of the window; inserting after a
@@ -563,9 +573,9 @@ unsafe fn place_above(target: HWND, badge: HWND) -> Option<HWND> {
     }
 }
 
-/// Puts every badge back just above its window.
-fn restack_badges() {
-    let badges: Vec<(isize, isize)> = BADGES.with(|b| {
+/// Puts every attached overlay back just above its window.
+fn restack_attached() {
+    let badges: Vec<(isize, isize)> = ATTACHED.with(|b| {
         b.borrow()
             .iter()
             .map(|(badge, target)| (*badge, *target))
@@ -598,8 +608,11 @@ thread_local! {
     static CAPS: std::cell::RefCell<Vec<(u32, Modifiers)>> = Default::default();
     static CAPS_HOOK: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     static CAPS_DOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// The window each badge sits above, by badge window.
-    static BADGES: std::cell::RefCell<HashMap<isize, isize>> = Default::default();
+    /// Overlay windows fading in: when it started, its length in
+    /// milliseconds, and the opacity it ends at.
+    static FADES: std::cell::RefCell<HashMap<isize, (std::time::Instant, u32, u8)>> = Default::default();
+    /// The window each attached overlay sits above, by overlay window.
+    static ATTACHED: std::cell::RefCell<HashMap<isize, isize>> = Default::default();
 }
 
 /// One entry of a popup menu, as the owner draws it.
@@ -738,6 +751,10 @@ unsafe extern "system" fn overlay_proc(
             EndPaint(hwnd, &paint);
             0
         }
+        WM_TIMER if wparam == FADE_TIMER => {
+            step_fade(hwnd);
+            0
+        }
         // A badge takes clicks without taking focus from the window beneath.
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
         WM_SETCURSOR => {
@@ -806,6 +823,68 @@ unsafe fn shape(
     }
 }
 
+/// Records the window `overlay` sits above, or that it floats over all, and
+/// returns that window.
+fn attach(overlay: isize, target: Option<i64>) -> Option<isize> {
+    let target = target.map(|id| id as isize);
+    ATTACHED.with(|a| match target {
+        Some(target) => a.borrow_mut().insert(overlay, target),
+        None => a.borrow_mut().remove(&overlay),
+    });
+    target
+}
+
+/// Where to insert `overlay`: above its window when attached, else above
+/// everything; `None` when it already is where it belongs.
+fn stacking(target: Option<isize>, overlay: isize) -> Option<HWND> {
+    match target {
+        Some(target) => unsafe { place_above(target as HWND, overlay as HWND) },
+        None => Some(HWND_TOPMOST),
+    }
+}
+
+/// The timer id that drives an overlay's fade.
+const FADE_TIMER: usize = 1;
+
+/// Makes `hwnd` transparent and brings it up to `alpha` over `ms`.
+unsafe fn start_fade(hwnd: isize, ms: u32, alpha: u8) {
+    SetLayeredWindowAttributes(hwnd as HWND, 0, 0, LWA_ALPHA);
+    FADES.with(|f| {
+        f.borrow_mut()
+            .insert(hwnd, (std::time::Instant::now(), ms, alpha))
+    });
+    SetTimer(hwnd as HWND, FADE_TIMER, 16, None);
+}
+
+/// Sets `hwnd` to `alpha`, or, while it fades, to where the fade ends.
+unsafe fn set_alpha(hwnd: isize, alpha: u8) {
+    let fading = FADES.with(|f| match f.borrow_mut().get_mut(&hwnd) {
+        Some(fade) => {
+            fade.2 = alpha;
+            true
+        }
+        None => false,
+    });
+    if !fading {
+        SetLayeredWindowAttributes(hwnd as HWND, 0, alpha, LWA_ALPHA);
+    }
+}
+
+/// One frame of a fade, eased so it slows as it arrives.
+unsafe fn step_fade(hwnd: HWND) {
+    let Some((start, ms, alpha)) = FADES.with(|f| f.borrow().get(&(hwnd as isize)).copied()) else {
+        KillTimer(hwnd, FADE_TIMER);
+        return;
+    };
+    let t = (start.elapsed().as_secs_f32() * 1000.0 / ms.max(1) as f32).min(1.0);
+    let eased = 1.0 - (1.0 - t).powi(3);
+    SetLayeredWindowAttributes(hwnd, 0, (eased * f32::from(alpha)).round() as u8, LWA_ALPHA);
+    if t >= 1.0 {
+        FADES.with(|f| f.borrow_mut().remove(&(hwnd as isize)));
+        KillTimer(hwnd, FADE_TIMER);
+    }
+}
+
 fn set_overlay(class: &[u16], key: u32, overlay: &Overlay) {
     let [border, fill] = OVERLAYS.with(|o| {
         *o.borrow_mut()
@@ -833,19 +912,9 @@ fn set_overlay(class: &[u16], key: u32, overlay: &Overlay) {
             );
             SetWindowRgn(border as HWND, std::ptr::null_mut(), 1);
             ShowWindow(fill as HWND, SW_HIDE);
-            let target = overlay.attach.map(|id| id as isize);
-            BADGES.with(|b| match target {
-                Some(target) => {
-                    b.borrow_mut().insert(border, target);
-                }
-                None => {
-                    b.borrow_mut().remove(&border);
-                }
-            });
-            let after = match target {
-                Some(target) => place_above(target as HWND, border as HWND),
-                None => Some(HWND_TOPMOST),
-            };
+            attach(fill, None);
+            let target = attach(border, overlay.attach);
+            let after = stacking(target, border);
             SetWindowPos(
                 border as HWND,
                 after.unwrap_or(std::ptr::null_mut()),
@@ -876,6 +945,8 @@ fn set_overlay(class: &[u16], key: u32, overlay: &Overlay) {
         }
         return;
     }
+    let target = attach(border, overlay.attach);
+    attach(fill, overlay.attach);
     unsafe {
         // The border is one window over the rect grown by its width, shaped
         // as a ring: the outer shape minus the rect itself.
@@ -886,14 +957,20 @@ fn set_overlay(class: &[u16], key: u32, overlay: &Overlay) {
         DeleteObject(hole as _);
         // The window owns the region from here on.
         SetWindowRgn(border as HWND, ring, 1);
+        let fade = overlay.fade_in.filter(|ms| *ms > 0);
+        match fade {
+            Some(ms) => start_fade(border, ms, 255),
+            None => set_alpha(border, 255),
+        }
+        let after = stacking(target, border);
         SetWindowPos(
             border as HWND,
-            HWND_TOPMOST,
+            after.unwrap_or(std::ptr::null_mut()),
             x - t,
             y - t,
             bw,
             bh,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW | if after.is_none() { SWP_NOZORDER } else { 0 },
         );
         InvalidateRect(border as HWND, std::ptr::null(), 1);
 
@@ -902,16 +979,21 @@ fn set_overlay(class: &[u16], key: u32, overlay: &Overlay) {
         if opacity <= 0.0 || w <= 0 || h <= 0 {
             ShowWindow(fill as HWND, SW_HIDE);
         } else {
-            SetLayeredWindowAttributes(fill as HWND, 0, (opacity * 255.0).round() as u8, LWA_ALPHA);
+            let alpha = (opacity * 255.0).round() as u8;
+            match fade {
+                Some(ms) => start_fade(fill, ms, alpha),
+                None => set_alpha(fill, alpha),
+            }
             SetWindowRgn(fill as HWND, shape(0, 0, w, h, radius), 1);
+            let after = stacking(target, fill);
             SetWindowPos(
                 fill as HWND,
-                HWND_TOPMOST,
+                after.unwrap_or(std::ptr::null_mut()),
                 x,
                 y,
                 w,
                 h,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW | if after.is_none() { SWP_NOZORDER } else { 0 },
             );
             InvalidateRect(fill as HWND, std::ptr::null(), 1);
         }
@@ -1116,6 +1198,48 @@ fn gdi(rgb: [u8; 3]) -> u32 {
 fn rgb_of(hex: &str) -> [u8; 3] {
     let value = colorref(hex);
     [value as u8, (value >> 8) as u8, (value >> 16) as u8]
+}
+
+/// The radius Windows 11 rounds window corners to, 8 at 96 DPI, scaled to
+/// the monitor; 0 before Windows 11, whose corners are square.
+unsafe fn corner_radius(monitor: windows_sys::Win32::Graphics::Gdi::HMONITOR) -> i32 {
+    if !rounded_corners() {
+        return 0;
+    }
+    let (mut x, mut y) = (96u32, 96u32);
+    windows_sys::Win32::UI::HiDpi::GetDpiForMonitor(
+        monitor,
+        windows_sys::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI,
+        &mut x,
+        &mut y,
+    );
+    (8 * x as i32 + 48) / 96
+}
+
+/// Whether this is Windows 11 or later (build 22000 and up).
+fn rounded_corners() -> bool {
+    static ROUNDED: OnceLock<bool> = OnceLock::new();
+    *ROUNDED.get_or_init(|| {
+        let mut buffer = [0u16; 32];
+        let mut size = (buffer.len() * 2) as u32;
+        let key = wide(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+        let name = wide("CurrentBuildNumber");
+        // SAFETY: reads one string into `buffer`, whose size is given.
+        let status = unsafe {
+            RegGetValueW(
+                windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE,
+                key.as_ptr(),
+                name.as_ptr(),
+                windows_sys::Win32::System::Registry::RRF_RT_REG_SZ,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        let text = String::from_utf16_lossy(&buffer);
+        let build: u32 = text.trim_end_matches('\0').parse().unwrap_or(0);
+        status == 0 && build >= 22000
+    })
 }
 
 /// Whether apps are set to dark mode.
@@ -1585,7 +1709,8 @@ fn clear_overlay(key: u32) {
     if let Some(edges) = OVERLAYS.with(|o| o.borrow_mut().remove(&key)) {
         for hwnd in edges {
             COLORS.with(|c| c.borrow_mut().remove(&hwnd));
-            BADGES.with(|b| b.borrow_mut().remove(&hwnd));
+            ATTACHED.with(|b| b.borrow_mut().remove(&hwnd));
+            FADES.with(|f| f.borrow_mut().remove(&hwnd));
             SMOOTH.with(|m| m.borrow_mut().remove(&hwnd));
             unsafe { DestroyWindow(hwnd as HWND) };
         }
@@ -1869,6 +1994,12 @@ mod live {
             snapshot.monitors.len(),
             snapshot.windows.len()
         );
+        for monitor in &snapshot.monitors {
+            println!(
+                "  monitor {:?} corner radius {}",
+                monitor.rect, monitor.corner_radius
+            );
+        }
         for window in snapshot.windows.iter().take(5) {
             println!(
                 "  window {:?} {:?} {:?}",
@@ -1889,6 +2020,7 @@ mod live {
             radius: 12,
             badge: None,
             attach: None,
+            fade_in: None,
         };
         windows.set_overlay(1, &overlay);
         windows

@@ -273,7 +273,8 @@ fn an_enabled_trace_records_the_snapshot_requests_and_events() {
     world.frame();
     assert!(!path.exists());
 
-    trace.set_enabled(true).unwrap();
+    world.send("tiler", "desktop/windows/trace", br#"{"on":true}"#);
+    world.frame();
     world.send(
         "tiler",
         "desktop/windows/move",
@@ -290,7 +291,8 @@ fn an_enabled_trace_records_the_snapshot_requests_and_events() {
         },
     ));
     world.frame();
-    trace.set_enabled(false).unwrap();
+    world.send("tiler", "desktop/windows/trace", br#"{"on":false}"#);
+    world.frame();
     world.send("t", "desktop/windows/focus", br#"{"id":1}"#);
     world.frame();
 
@@ -317,7 +319,58 @@ fn an_enabled_trace_records_the_snapshot_requests_and_events() {
             expect("in", "desktop/windows/move"),
             expect("in", "desktop/windows/move"),
             expect("error", "desktop/windows/move"),
+            expect("in", "desktop/windows/trace"),
             expect("stop", ""),
         ]
     );
+}
+
+#[test]
+fn a_guest_turns_the_trace_on_until_it_stops() {
+    let path = std::env::temp_dir().join(format!("hf-trace-guest-{}.jsonl", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mut world = world();
+    let trace = crate::Trace::new(path.clone());
+    world.desktop.trace = trace.clone();
+    world.send("tiler", "desktop/windows/trace", br#"{"on":true}"#);
+    world.frame();
+    assert!(trace.enabled());
+    world.lifecycle("tiler", Lifecycle::Stopped);
+    world.frame();
+    assert!(!trace.enabled());
+    world.send("tiler", "desktop/windows/trace", br#"{"on":true}"#);
+    world.frame();
+    world.send("tiler", "desktop/windows/trace", br#"{"on":false}"#);
+    world.frame();
+    assert!(!trace.enabled());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_delayed_move_waits_and_a_newer_move_replaces_it() {
+    let mut world = world();
+    world.send(
+        "t",
+        "desktop/windows/move",
+        br#"{"id":7,"rect":{"x":1,"y":2,"w":3,"h":4},"delay":50}"#,
+    );
+    world.frame();
+    assert!(world.calls().is_empty());
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    world.frame();
+    assert_eq!(world.calls(), vec!["move 7 1 2 3 4"]);
+    world.send(
+        "t",
+        "desktop/windows/move",
+        br#"{"id":7,"rect":{"x":5,"y":5,"w":5,"h":5},"delay":50}"#,
+    );
+    world.send(
+        "t",
+        "desktop/windows/move",
+        br#"{"id":7,"rect":{"x":9,"y":9,"w":9,"h":9}}"#,
+    );
+    world.frame();
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    world.frame();
+    assert_eq!(world.calls(), vec!["move 7 1 2 3 4", "move 7 9 9 9 9"]);
 }
